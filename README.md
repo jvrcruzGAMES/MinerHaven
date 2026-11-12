@@ -45,8 +45,10 @@ When installed for a Turtle, **MinerHaven Turtle Auto-Miner** loads automaticall
   3. Automatically **returns to its saved Home** (`/home.cfg`).
   4. **Waits at Home** until its inventory has **no more ores** (e.g., unloaded by a player or hopper), then automatically resumes mining!
 - **`stop` instruction**:
-  - Immediately halts mining and transitions to **`IDLE (Stopped)`**.
-  - **Does not exit or terminate**—the program stays alive and idle until you give the `start` instruction again.
+  - Immediately stops mining, **returns the turtle back to its Home** (even if its inventory is not full), and transitions to **`IDLE (Stopped)`**.
+  - **Does not exit or terminate**—the program stays alive and idle at Home until you give the `start` instruction again.
+- **`sethome` instruction**:
+  - Sets the turtle's Home to the **current block it is in** and saves it to `/home.cfg`.
 
 ### Controlling the Turtle Auto-Miner
 While the program is running on the Turtle screen, type a command and press **Enter** (or click the on-screen buttons on an Advanced Turtle):

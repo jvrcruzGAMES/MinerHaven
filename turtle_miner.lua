@@ -170,6 +170,8 @@ function TurtleMiner.new(opts)
     self.minedItems = {}
     self.commandBuffer = ""
     self.scanner = opts.scanner or nil
+    self.inWorkerStep = false
+    self.pendingReturnOnStop = false
 
     return self
 end
@@ -195,8 +197,8 @@ function TurtleMiner:saveState()
     saveConfigFile(self.stateFile, { running = self.running })
 end
 
---- Set the turtle's current location as its Home and save to disk (`/home.cfg`).
-function TurtleMiner:setHomeHere(facingDir)
+--- Set the turtle's Home to the current block it is in and save to disk (`/home.cfg`).
+function TurtleMiner:sethome(facingDir)
     local gx, gy, gz = nil, nil, nil
     if gps and type(gps.locate) == "function" then
         local ok, x, y, z = pcall(gps.locate, 1.5)
@@ -205,42 +207,69 @@ function TurtleMiner:setHomeHere(facingDir)
         end
     end
 
-    local dir = facingDir ~= nil and parseDir(facingDir) or (self.pos and self.pos.dir or 0)
+    local curX = gx or (self.pos and self.pos.x) or 0
+    local curY = gy or (self.pos and self.pos.y) or 0
+    local curZ = gz or (self.pos and self.pos.z) or 0
+    local dir = facingDir ~= nil and parseDir(facingDir) or (self.pos and self.pos.dir) or 0
+
+    self.pos = {
+        x = curX,
+        y = curY,
+        z = curZ,
+        dir = dir,
+    }
     self.home = {
-        x = gx or 0,
-        y = gy or 0,
-        z = gz or 0,
+        x = curX,
+        y = curY,
+        z = curZ,
         dir = dir,
         useGps = (gx ~= nil),
     }
-    self.pos = {
-        x = self.home.x,
-        y = self.home.y,
-        z = self.home.z,
-        dir = dir,
-    }
     saveConfigFile(self.homeFile, self.home)
     self:savePos()
-    self.lastAction = ("Home saved at (%d, %d, %d) Facing %s"):format(
+    self.lastAction = ("Home set to current block (%d, %d, %d) [%s]"):format(
         self.home.x, self.home.y, self.home.z, DIR_NAMES[dir] or "N"
     )
     return self.home
 end
 
+-- Alias for backwards compatibility
+TurtleMiner.setHomeHere = TurtleMiner.sethome
+
 --- Start the auto-miner.
 function TurtleMiner:start()
     self.running = true
+    self.pendingReturnOnStop = false
     self.phase = "MINING"
     self.lastAction = "Started! Scanning for nearby ores..."
     self:saveState()
 end
 
---- Stop the auto-miner without exiting the program (stays idle until started again).
+--- Stop the auto-miner without exiting the program.
+-- If stopped while running (even when inventory is not full), returns to Home before staying idle.
 function TurtleMiner:stop()
+    local wasRunning = self.running
     self.running = false
-    self.phase = "IDLE (Stopped)"
-    self.lastAction = "Stopped. Staying idle until 'start'..."
     self:saveState()
+
+    if wasRunning or not self:isAtHome() then
+        if self.inWorkerStep then
+            -- Worker coroutine is currently mid-step/movement; signal it to abort and return home immediately
+            self.pendingReturnOnStop = true
+            self.phase = "RETURNING HOME (Stopping)"
+            self.lastAction = "Stopping... returning to Home..."
+        else
+            if not self:isAtHome() then
+                self:returnToHome()
+            end
+            self.pendingReturnOnStop = false
+            self.phase = "IDLE (Stopped)"
+            self.lastAction = "Stopped at Home. Staying idle until 'start'..."
+        end
+    else
+        self.phase = "IDLE (Stopped)"
+        self.lastAction = "Stopped. Staying idle until 'start'..."
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -597,19 +626,35 @@ end
 -- Single Step of the Worker State Machine
 --------------------------------------------------------------------------------
 
+function TurtleMiner:finishStopReturnHome()
+    if not self:isAtHome() then
+        self:returnToHome()
+    end
+    self.pendingReturnOnStop = false
+    self.phase = "IDLE (Stopped)"
+    self.lastAction = "Stopped at Home. Staying idle until 'start'..."
+    return "idle"
+end
+
 --- Execute one logical step of the auto-miner state machine.
 -- Separated so it can be driven both by the continuous daemon loop and by unit tests.
 function TurtleMiner:stepWorker()
     if not self.running then
+        if self.pendingReturnOnStop then
+            return self:finishStopReturnHome()
+        end
         self.phase = "IDLE (Stopped)"
         return "idle"
     end
+
+    self.inWorkerStep = true
 
     -- 1. If we are waiting at Home for ores to be unloaded, check if ores are gone
     if self.phase == "WAITING AT HOME" then
         if self:hasOresInInventory() then
             local _, oreCount = self:getInventoryStats()
             self.lastAction = ("Waiting at Home: %d ore(s) still in inventory"):format(oreCount)
+            self.inWorkerStep = false
             return "waiting_unload"
         else
             -- All ores have been removed! Clean up any leftover waste stone so inventory isn't full
@@ -630,6 +675,10 @@ function TurtleMiner:stepWorker()
         end
         if self:isInventoryFull() then
             self:returnToHome()
+            self.inWorkerStep = false
+            if not self.running then
+                return self:finishStopReturnHome()
+            end
             if self:hasOresInInventory() then
                 self.phase = "WAITING AT HOME"
                 local _, oreCount = self:getInventoryStats()
@@ -646,6 +695,7 @@ function TurtleMiner:stepWorker()
     self.phase = "MINING"
     local scanner = self:ensureScanner()
     if not scanner then
+        self.inWorkerStep = false
         return "no_scanner"
     end
 
@@ -654,8 +704,14 @@ function TurtleMiner:stepWorker()
         retryDelay = 0.5,
     })
 
+    if not self.running then
+        self.inWorkerStep = false
+        return self:finishStopReturnHome()
+    end
+
     if not ores then
         self.lastAction = "Scan wait: " .. tostring(scanErr)
+        self.inWorkerStep = false
         return "scan_error"
     end
 
@@ -667,9 +723,14 @@ function TurtleMiner:stepWorker()
                 self.scanRadius, self.exploreCount, self.maxExploreSteps
             )
             self:stepForward(true)
+            self.inWorkerStep = false
+            if not self.running then
+                return self:finishStopReturnHome()
+            end
             return "exploring"
         else
             self.lastAction = ("No nearby ores found in r=%d."):format(self.scanRadius)
+            self.inWorkerStep = false
             return "no_ores"
         end
     end
@@ -685,10 +746,9 @@ function TurtleMiner:stepWorker()
     )
 
     local mined = self:moveTo(targetX, targetY, targetZ, true, true)
+    self.inWorkerStep = false
     if not self.running then
-        self.phase = "IDLE (Stopped)"
-        self.lastAction = "Stopped during movement. Idle."
-        return "idle"
+        return self:finishStopReturnHome()
     end
 
     if mined then
@@ -700,6 +760,9 @@ function TurtleMiner:stepWorker()
     -- Immediately check if inventory became full after mining this ore
     if self:isInventoryFull() then
         self:returnToHome()
+        if not self.running then
+            return self:finishStopReturnHome()
+        end
         if self:hasOresInInventory() then
             self.phase = "WAITING AT HOME"
             local _, oreCount = self:getInventoryStats()
@@ -783,7 +846,7 @@ function TurtleMiner:executeCommand(rawCmd)
         self:stop()
     elseif cmd == "sethome" or cmd:match("^sethome%s+") then
         local dirArg = cmd:match("^sethome%s+(%S+)")
-        self:setHomeHere(dirArg)
+        self:sethome(dirArg)
     elseif cmd == "return" or cmd == "home" then
         self:stop()
         self:returnToHome()
@@ -800,7 +863,7 @@ function TurtleMiner:runDaemon()
 
     local function workerLoop()
         while self.keepProgramAlive do
-            if self.running then
+            if self.running or self.pendingReturnOnStop then
                 local status = self:stepWorker()
                 self:drawUI()
                 if status == "waiting_unload" or status == "no_ores" or status == "no_scanner" or status == "scan_error" then
@@ -840,7 +903,7 @@ function TurtleMiner:runDaemon()
                     elseif p2 >= 12 and p2 <= 17 then
                         self:stop()
                     elseif p2 >= 21 and p2 <= 29 then
-                        self:setHomeHere()
+                        self:sethome()
                     elseif p2 >= 32 and p2 <= 37 then
                         self:executeCommand("return")
                     end
@@ -922,8 +985,11 @@ if #args > 0 then
         miner:runDaemon()
         return TurtleMiner
     elseif sub == "sethome" then
-        local h = miner:setHomeHere(args[2])
-        print(("[MinerHaven] Turtle Home saved to %s: (%d, %d, %d) Facing %s"):format(
+        local h = miner:sethome(args[2])
+        if os and os.queueEvent then
+            os.queueEvent("minerhaven_command", args[2] and ("sethome " .. tostring(args[2])) or "sethome")
+        end
+        print(("[MinerHaven] Turtle Home set to current block in %s: (%d, %d, %d) Facing %s"):format(
             HOME_FILE, h.x, h.y, h.z, DIR_NAMES[h.dir or 0] or "N"
         ))
         return TurtleMiner

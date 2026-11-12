@@ -327,21 +327,37 @@ assertTrue(miner:isAtHome(), "still at home")
 
 -- Step 3: Unload ores from turtle's inventory -> next step automatically resumes mining!
 clearOresFromInventory()
--- Don't fill all 16 slots on this dig so it stays in mining mode
+-- Don't fill all 16 slots on this dig so it stays in mining mode (only 1 slot used, not full, away from home!)
 _G.turtle.dig = function()
     mockInv[1] = { name = "minecraft:iron_ore", count = 1, tags = { ["forge:ores"] = true } }
     return true
 end
 local resumeRes = miner:stepWorker()
 assertEq(resumeRes, "mined", "once inventory has no more ores, turtle automatically goes back to mining")
+assertTrue(not miner:isInventoryFull(), "inventory is NOT full (only 1/16 slots used)")
+assertTrue(not miner:isAtHome(), "turtle moved away from home to mine the ore")
 
--- Step 4: Issue 'stop' instruction -> program does NOT exit (keepProgramAlive == true), stays idle!
+-- Step 4: Issue 'stop' instruction while running and NOT full -> returns to Home and stays idle!
 miner:executeCommand("stop")
 assertEq(miner.running, false, "miner running is false after stop")
+assertTrue(miner:isAtHome(), "turtle returned to Home when stopped while running and not full")
 assertEq(miner.keepProgramAlive, true, "miner program stays alive (idle) when stopped")
 assertEq(miner:stepWorker(), "idle", "miner stays idle until activated again")
 
--- Step 5: Issue 'start' instruction again -> activates again!
+-- Step 5: Test 'sethome' instruction sets Home to the current block the turtle is in
+_G.gps = nil -- Test dead-reckoning current block (without GPS override)
+miner.pos.x = 25
+miner.pos.y = 50
+miner.pos.z = -12
+miner.pos.dir = 2
+miner:executeCommand("sethome")
+assertEq(miner.home.x, 25, "sethome updated home.x to current block X (25)")
+assertEq(miner.home.y, 50, "sethome updated home.y to current block Y (50)")
+assertEq(miner.home.z, -12, "sethome updated home.z to current block Z (-12)")
+assertEq(miner.home.dir, 2, "sethome updated home.dir to current facing (2)")
+assertTrue(miner:isAtHome(), "turtle is now at its newly set Home")
+
+-- Step 6: Issue 'start' instruction again -> activates again!
 miner:executeCommand("start")
 assertEq(miner.running, true, "miner reactivates when given start again")
 
