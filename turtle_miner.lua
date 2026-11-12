@@ -143,6 +143,15 @@ end
 local TurtleMiner = {}
 TurtleMiner.__index = TurtleMiner
 
+--- Blocks that the turtle must NEVER break and must pathfind around.
+TurtleMiner.PROTECTED_BLOCKS = {
+    ["allthemodium:teleport_pad"] = true,
+}
+
+local function coordKey(x, y, z)
+    return ("%d,%d,%d"):format(x, y, z)
+end
+
 function TurtleMiner.new(opts)
     opts = opts or {}
     local self = setmetatable({}, TurtleMiner)
@@ -168,12 +177,28 @@ function TurtleMiner.new(opts)
     self.maxExploreSteps = tonumber(opts.maxExploreSteps) or 3
     self.exploreCount = 0
     self.minedItems = {}
+    self.blockedCoords = {}
     self.commandBuffer = ""
     self.scanner = opts.scanner or nil
     self.inWorkerStep = false
     self.pendingReturnOnStop = false
 
     return self
+end
+
+function TurtleMiner:isProtectedBlock(blockName)
+    if type(blockName) ~= "string" then
+        return false
+    end
+    return TurtleMiner.PROTECTED_BLOCKS[blockName:lower()] == true
+end
+
+function TurtleMiner:markBlocked(x, y, z)
+    self.blockedCoords[coordKey(x, y, z)] = true
+end
+
+function TurtleMiner:isBlocked(x, y, z)
+    return self.blockedCoords[coordKey(x, y, z)] == true
 end
 
 function TurtleMiner:ensureScanner()
@@ -456,14 +481,52 @@ function TurtleMiner:turnTo(targetDir)
     return true
 end
 
+function TurtleMiner:inspectDirection(inspectFn)
+    if not turtle or type(inspectFn) ~= "function" then
+        return false, nil
+    end
+    local ok, data = inspectFn()
+    if ok and type(data) == "table" then
+        return true, data
+    end
+    return false, nil
+end
+
 function TurtleMiner:stepForward(digIfBlocked)
     if not turtle then return false end
+    local vec = DIR_VECTORS[self.pos.dir] or { x = 0, z = -1 }
+    local nx, ny, nz = self.pos.x + vec.x, self.pos.y, self.pos.z + vec.z
+    if self:isBlocked(nx, ny, nz) then
+        return false, "protected"
+    end
+
     self:ensureFuel(20)
+
+    -- If a block is detected in front before moving, inspect it and break it (unless protected)
+    if turtle.detect and turtle.detect() then
+        local hasBlock, data = self:inspectDirection(turtle.inspect)
+        if hasBlock and self:isProtectedBlock(data.name) then
+            self:markBlocked(nx, ny, nz)
+            return false, "protected"
+        end
+        if digIfBlocked and turtle.dig then
+            local before = self:snapshotInventoryCounts()
+            turtle.dig()
+            self:recordNewlyMinedItems(before)
+        end
+    end
+
     local attempts = 0
     while not turtle.forward() do
         attempts = attempts + 1
+        local hasBlock, data = self:inspectDirection(turtle.inspect)
+        if hasBlock and self:isProtectedBlock(data.name) then
+            self:markBlocked(nx, ny, nz)
+            return false, "protected"
+        end
         if attempts > 10 then
-            return false
+            self:markBlocked(nx, ny, nz)
+            return false, "blocked"
         end
         if digIfBlocked and turtle.dig then
             local before = self:snapshotInventoryCounts()
@@ -475,21 +538,45 @@ function TurtleMiner:stepForward(digIfBlocked)
         end
         sleepSeconds(0.2)
     end
-    local vec = DIR_VECTORS[self.pos.dir] or { x = 0, z = -1 }
-    self.pos.x = self.pos.x + vec.x
-    self.pos.z = self.pos.z + vec.z
+    self.pos.x = nx
+    self.pos.z = nz
     self:savePos()
     return true
 end
 
 function TurtleMiner:stepUp(digIfBlocked)
     if not turtle then return false end
+    local nx, ny, nz = self.pos.x, self.pos.y + 1, self.pos.z
+    if self:isBlocked(nx, ny, nz) then
+        return false, "protected"
+    end
+
     self:ensureFuel(20)
+
+    if turtle.detectUp and turtle.detectUp() then
+        local hasBlock, data = self:inspectDirection(turtle.inspectUp)
+        if hasBlock and self:isProtectedBlock(data.name) then
+            self:markBlocked(nx, ny, nz)
+            return false, "protected"
+        end
+        if digIfBlocked and turtle.digUp then
+            local before = self:snapshotInventoryCounts()
+            turtle.digUp()
+            self:recordNewlyMinedItems(before)
+        end
+    end
+
     local attempts = 0
     while not turtle.up() do
         attempts = attempts + 1
+        local hasBlock, data = self:inspectDirection(turtle.inspectUp)
+        if hasBlock and self:isProtectedBlock(data.name) then
+            self:markBlocked(nx, ny, nz)
+            return false, "protected"
+        end
         if attempts > 10 then
-            return false
+            self:markBlocked(nx, ny, nz)
+            return false, "blocked"
         end
         if digIfBlocked and turtle.digUp then
             local before = self:snapshotInventoryCounts()
@@ -501,19 +588,44 @@ function TurtleMiner:stepUp(digIfBlocked)
         end
         sleepSeconds(0.2)
     end
-    self.pos.y = self.pos.y + 1
+    self.pos.y = ny
     self:savePos()
     return true
 end
 
 function TurtleMiner:stepDown(digIfBlocked)
     if not turtle then return false end
+    local nx, ny, nz = self.pos.x, self.pos.y - 1, self.pos.z
+    if self:isBlocked(nx, ny, nz) then
+        return false, "protected"
+    end
+
     self:ensureFuel(20)
+
+    if turtle.detectDown and turtle.detectDown() then
+        local hasBlock, data = self:inspectDirection(turtle.inspectDown)
+        if hasBlock and self:isProtectedBlock(data.name) then
+            self:markBlocked(nx, ny, nz)
+            return false, "protected"
+        end
+        if digIfBlocked and turtle.digDown then
+            local before = self:snapshotInventoryCounts()
+            turtle.digDown()
+            self:recordNewlyMinedItems(before)
+        end
+    end
+
     local attempts = 0
     while not turtle.down() do
         attempts = attempts + 1
+        local hasBlock, data = self:inspectDirection(turtle.inspectDown)
+        if hasBlock and self:isProtectedBlock(data.name) then
+            self:markBlocked(nx, ny, nz)
+            return false, "protected"
+        end
         if attempts > 10 then
-            return false
+            self:markBlocked(nx, ny, nz)
+            return false, "blocked"
         end
         if digIfBlocked and turtle.digDown then
             local before = self:snapshotInventoryCounts()
@@ -525,12 +637,139 @@ function TurtleMiner:stepDown(digIfBlocked)
         end
         sleepSeconds(0.2)
     end
-    self.pos.y = self.pos.y - 1
+    self.pos.y = ny
     self:savePos()
     return true
 end
 
+--- Find an alternative 3D path from `self.pos` to `(tx, ty, tz)` avoiding `self.blockedCoords`.
+-- Prefers moving down (-Y) before horizontal movement (X/Z), and horizontal movement before up (+Y).
+function TurtleMiner:findPath(tx, ty, tz, stopAdjacent)
+    local sx, sy, sz = self.pos.x, self.pos.y, self.pos.z
+    local startKey = coordKey(sx, sy, sz)
+
+    local function isGoal(x, y, z)
+        local d = math.abs(tx - x) + math.abs(ty - y) + math.abs(tz - z)
+        if stopAdjacent then
+            return d == 1
+        end
+        return d == 0
+    end
+
+    if isGoal(sx, sy, sz) then
+        return {}
+    end
+
+    local openList = {
+        { x = sx, y = sy, z = sz, g = 0, f = math.abs(tx - sx) + math.abs(ty - sy) + math.abs(tz - sz), order = 0 },
+    }
+    local cameFrom = {}
+    local gScore = { [startKey] = 0 }
+    local closed = {}
+    local pushCounter = 0
+    local maxIterations = 1500
+    local iterations = 0
+
+    -- Candidate steps: Down first, then horizontal directions, then Up last
+    local neighbors = {
+        { dx = 0, dy = -1, dz = 0, bias = -0.002 }, -- Prefer moving down first
+        { dx = 1, dy = 0, dz = 0, bias = 0 },
+        { dx = -1, dy = 0, dz = 0, bias = 0 },
+        { dx = 0, dy = 0, dz = 1, bias = 0 },
+        { dx = 0, dy = 0, dz = -1, bias = 0 },
+        { dx = 0, dy = 1, dz = 0, bias = 0.002 },   -- Move up last
+    }
+
+    while #openList > 0 and iterations < maxIterations do
+        iterations = iterations + 1
+
+        -- Pop node with lowest f score
+        local bestIdx = 1
+        for i = 2, #openList do
+            if openList[i].f < openList[bestIdx].f
+                or (openList[i].f == openList[bestIdx].f and openList[i].order < openList[bestIdx].order)
+            then
+                bestIdx = i
+            end
+        end
+        local current = table.remove(openList, bestIdx)
+        local cKey = coordKey(current.x, current.y, current.z)
+
+        if isGoal(current.x, current.y, current.z) then
+            local path = {}
+            local traceKey = cKey
+            local currNode = current
+            while traceKey ~= startKey do
+                table.insert(path, 1, { x = currNode.x, y = currNode.y, z = currNode.z })
+                currNode = cameFrom[traceKey]
+                if not currNode then break end
+                traceKey = coordKey(currNode.x, currNode.y, currNode.z)
+            end
+            return path
+        end
+
+        closed[cKey] = true
+
+        for _, nb in ipairs(neighbors) do
+            local nx = current.x + nb.dx
+            local ny = current.y + nb.dy
+            local nz = current.z + nb.dz
+            local nKey = coordKey(nx, ny, nz)
+
+            local isTargetBlockItself = stopAdjacent and (nx == tx and ny == ty and nz == tz)
+            if not closed[nKey] and not self:isBlocked(nx, ny, nz) and not isTargetBlockItself then
+                local tentativeG = current.g + 1
+                local prevG = gScore[nKey]
+                if prevG == nil or tentativeG < prevG then
+                    cameFrom[nKey] = current
+                    gScore[nKey] = tentativeG
+                    local h = math.abs(tx - nx) + math.abs(ty - ny) + math.abs(tz - nz)
+                    pushCounter = pushCounter + 1
+                    table.insert(openList, {
+                        x = nx,
+                        y = ny,
+                        z = nz,
+                        g = tentativeG,
+                        f = tentativeG + h + nb.bias,
+                        order = pushCounter,
+                    })
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+--- Step directly to a 1-block neighbor `(nx, ny, nz)`.
+function TurtleMiner:stepToNeighbor(nx, ny, nz)
+    local dx = nx - self.pos.x
+    local dy = ny - self.pos.y
+    local dz = nz - self.pos.z
+    if dy == -1 and dx == 0 and dz == 0 then
+        return self:stepDown(true)
+    elseif dy == 1 and dx == 0 and dz == 0 then
+        return self:stepUp(true)
+    elseif dy == 0 and dx == 1 and dz == 0 then
+        self:turnTo(1)
+        return self:stepForward(true)
+    elseif dy == 0 and dx == -1 and dz == 0 then
+        self:turnTo(3)
+        return self:stepForward(true)
+    elseif dy == 0 and dx == 0 and dz == 1 then
+        self:turnTo(2)
+        return self:stepForward(true)
+    elseif dy == 0 and dx == 0 and dz == -1 then
+        self:turnTo(0)
+        return self:stepForward(true)
+    end
+    return false
+end
+
 --- Navigate to target coordinates `(tx, ty, tz)`.
+-- Prefers moving down (-Y) before moving horizontally (X/Z) in the direction of the ore,
+-- breaks blocks in the way (except `allthemodium:teleport_pad`), and finds an alternative
+-- path if `allthemodium:teleport_pad` or another unbreakable block is encountered.
 -- @tparam number tx Target X
 -- @tparam number ty Target Y
 -- @tparam number tz Target Z
@@ -538,6 +777,10 @@ end
 -- @tparam boolean respectStop If true, aborts movement immediately if `self.running` becomes false
 -- @treturn boolean success
 function TurtleMiner:moveTo(tx, ty, tz, stopAdjacent, respectStop)
+    if self:isBlocked(tx, ty, tz) then
+        return false
+    end
+
     while true do
         if respectStop and not self.running then
             return false
@@ -555,47 +798,107 @@ function TurtleMiner:moveTo(tx, ty, tz, stopAdjacent, respectStop)
         -- If we only need to reach an adjacent block to dig the target ore
         if stopAdjacent and dist == 1 then
             local before = self:snapshotInventoryCounts()
-            if dy == 1 and turtle.digUp then
-                turtle.digUp()
-            elseif dy == -1 and turtle.digDown then
-                turtle.digDown()
+            if dy == 1 then
+                local hasBlock, data = self:inspectDirection(turtle.inspectUp)
+                if hasBlock and self:isProtectedBlock(data.name) then
+                    self:markBlocked(tx, ty, tz)
+                    return false
+                end
+                if turtle.digUp then turtle.digUp() end
+            elseif dy == -1 then
+                local hasBlock, data = self:inspectDirection(turtle.inspectDown)
+                if hasBlock and self:isProtectedBlock(data.name) then
+                    self:markBlocked(tx, ty, tz)
+                    return false
+                end
+                if turtle.digDown then turtle.digDown() end
             elseif dx == 1 then
                 self:turnTo(1)
+                local hasBlock, data = self:inspectDirection(turtle.inspect)
+                if hasBlock and self:isProtectedBlock(data.name) then
+                    self:markBlocked(tx, ty, tz)
+                    return false
+                end
                 if turtle.dig then turtle.dig() end
             elseif dx == -1 then
                 self:turnTo(3)
+                local hasBlock, data = self:inspectDirection(turtle.inspect)
+                if hasBlock and self:isProtectedBlock(data.name) then
+                    self:markBlocked(tx, ty, tz)
+                    return false
+                end
                 if turtle.dig then turtle.dig() end
             elseif dz == 1 then
                 self:turnTo(2)
+                local hasBlock, data = self:inspectDirection(turtle.inspect)
+                if hasBlock and self:isProtectedBlock(data.name) then
+                    self:markBlocked(tx, ty, tz)
+                    return false
+                end
                 if turtle.dig then turtle.dig() end
             elseif dz == -1 then
                 self:turnTo(0)
+                local hasBlock, data = self:inspectDirection(turtle.inspect)
+                if hasBlock and self:isProtectedBlock(data.name) then
+                    self:markBlocked(tx, ty, tz)
+                    return false
+                end
                 if turtle.dig then turtle.dig() end
             end
             self:recordNewlyMinedItems(before)
             return true
         end
 
-        -- Move vertically first, then X, then Z
+        -- Movement priority:
+        -- 1. Move DOWN first (dy < 0) before moving to the direction the ore is in
+        -- 2. Move in the horizontal direction the ore is in (X, then Z)
+        -- 3. Move UP (dy > 0)
         local moved = false
-        if dy > 0 then
-            moved = self:stepUp(true)
-        elseif dy < 0 then
+
+        if dy < 0 and not self:isBlocked(self.pos.x, self.pos.y - 1, self.pos.z) then
             moved = self:stepDown(true)
         end
 
         if not moved and dx ~= 0 then
-            self:turnTo(dx > 0 and 1 or 3)
-            moved = self:stepForward(true)
+            local stepX = dx > 0 and 1 or -1
+            if not self:isBlocked(self.pos.x + stepX, self.pos.y, self.pos.z) then
+                self:turnTo(dx > 0 and 1 or 3)
+                moved = self:stepForward(true)
+            end
         end
 
         if not moved and dz ~= 0 then
-            self:turnTo(dz > 0 and 2 or 0)
-            moved = self:stepForward(true)
+            local stepZ = dz > 0 and 1 or -1
+            if not self:isBlocked(self.pos.x, self.pos.y, self.pos.z + stepZ) then
+                self:turnTo(dz > 0 and 2 or 0)
+                moved = self:stepForward(true)
+            end
         end
 
+        if not moved and dy > 0 and not self:isBlocked(self.pos.x, self.pos.y + 1, self.pos.z) then
+            moved = self:stepUp(true)
+        end
+
+        -- If direct movement was blocked (e.g. by allthemodium:teleport_pad), find an alternative path around it
         if not moved then
-            return false
+            local path = self:findPath(tx, ty, tz, stopAdjacent)
+            if not path or #path == 0 then
+                return false
+            end
+            local stepOk = false
+            for _, node in ipairs(path) do
+                if respectStop and not self.running then
+                    return false
+                end
+                if not self:stepToNeighbor(node.x, node.y, node.z) then
+                    -- Hit a newly discovered protected block along the detour; break inner loop to re-plan
+                    break
+                end
+                stepOk = true
+            end
+            if not stepOk and not self:findPath(tx, ty, tz, stopAdjacent) then
+                return false
+            end
         end
     end
 end
@@ -691,7 +994,7 @@ function TurtleMiner:stepWorker()
         end
     end
 
-    -- 3. Scan for nearby ores by tag
+    -- 3. Scan for nearby blocks and ores by tag (while pre-marking any allthemodium:teleport_pad)
     self.phase = "MINING"
     local scanner = self:ensureScanner()
     if not scanner then
@@ -699,7 +1002,7 @@ function TurtleMiner:stepWorker()
         return "no_scanner"
     end
 
-    local ores, scanErr = scanner:scanOresByTag(self.scanRadius, {
+    local scannedBlocks, scanErr = scanner:scan(self.scanRadius, {
         retries = 5,
         retryDelay = 0.5,
     })
@@ -709,10 +1012,19 @@ function TurtleMiner:stepWorker()
         return self:finishStopReturnHome()
     end
 
-    if not ores then
+    if not scannedBlocks then
         self.lastAction = "Scan wait: " .. tostring(scanErr)
         self.inWorkerStep = false
         return "scan_error"
+    end
+
+    local ores = {}
+    for _, b in ipairs(scannedBlocks) do
+        if self:isProtectedBlock(b.name) then
+            self:markBlocked(self.pos.x + b.x, self.pos.y + b.y, self.pos.z + b.z)
+        elseif GeoScanner.hasOreTag(b) then
+            table.insert(ores, b)
+        end
     end
 
     if #ores == 0 then
@@ -736,25 +1048,35 @@ function TurtleMiner:stepWorker()
     end
 
     self.exploreCount = 0
-    local target = ores[1]
-    local targetX = self.pos.x + target.x
-    local targetY = self.pos.y + target.y
-    local targetZ = self.pos.z + target.z
+    local mined = false
+    local minedTarget = nil
 
-    self.lastAction = ("Mining %s at (%+d,%+d,%+d)"):format(
-        target.prettyName, target.x, target.y, target.z
-    )
+    for _, target in ipairs(ores) do
+        local targetX = self.pos.x + target.x
+        local targetY = self.pos.y + target.y
+        local targetZ = self.pos.z + target.z
 
-    local mined = self:moveTo(targetX, targetY, targetZ, true, true)
-    self.inWorkerStep = false
-    if not self.running then
-        return self:finishStopReturnHome()
+        self.lastAction = ("Mining %s at (%+d,%+d,%+d)"):format(
+            target.prettyName, target.x, target.y, target.z
+        )
+
+        mined = self:moveTo(targetX, targetY, targetZ, true, true)
+        if not self.running then
+            self.inWorkerStep = false
+            return self:finishStopReturnHome()
+        end
+        if mined then
+            minedTarget = target
+            break
+        end
     end
 
-    if mined then
-        self.lastAction = ("Collected %s!"):format(target.prettyName)
+    self.inWorkerStep = false
+
+    if mined and minedTarget then
+        self.lastAction = ("Collected %s!"):format(minedTarget.prettyName)
     else
-        self.lastAction = ("Could not reach %s"):format(target.prettyName)
+        self.lastAction = ("Could not reach %s"):format(ores[1].prettyName)
     end
 
     -- Immediately check if inventory became full after mining this ore

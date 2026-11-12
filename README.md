@@ -41,7 +41,9 @@ When installed for a Turtle, **MinerHaven Turtle Auto-Miner** loads automaticall
 ### How It Works
 - **`start` instruction**:
   1. Scans for nearby ores **by block tag** (`#forge:ores`, `#c:ores`, `#minecraft:*_ores`) using the Geo Scanner.
-  2. Navigates to and mines the nearest ores until the turtle's **16-slot inventory is full**.
+  2. Navigates to and mines the nearest ores until the turtle's **16-slot inventory is full**:
+     - **Down-first movement priority**: Prefers moving **down (`-Y`)** first before moving horizontally in the direction of the ore.
+     - **Obstacle breaking & Teleport Pad protection**: Breaks obstructing blocks along its path **except `allthemodium:teleport_pad`**. If an `allthemodium:teleport_pad` is detected (via Geo Scanner scan or `turtle.inspect`), the turtle leaves it untouched and automatically pathfinds an alternative route around it to reach the target ore.
   3. Automatically **returns to its saved Home** (`/home.cfg`).
   4. **Waits at Home** until its inventory has **no more ores** (e.g., unloaded by a player or hopper), then automatically resumes mining!
 - **`stop` instruction**:

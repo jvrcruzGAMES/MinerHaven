@@ -361,4 +361,135 @@ assertTrue(miner:isAtHome(), "turtle is now at its newly set Home")
 miner:executeCommand("start")
 assertEq(miner.running, true, "miner reactivates when given start again")
 
+-- 8. Test Movement Preference (Down before horizontal direction) & Obstacle Avoidance around allthemodium:teleport_pad
+local miner2 = turtleMinerMod.new()
+miner2.pos = { x = 0, y = 10, z = 0, dir = 0 }
+miner2.home = { x = 0, y = 10, z = 0, dir = 0 }
+miner2.running = true
+
+local stepHistory = {}
+local dugBlocks = {}
+local worldMap = {
+    ["0,9,0"] = "minecraft:stone",
+    ["0,8,0"] = "minecraft:stone",
+    ["1,8,0"] = "minecraft:stone",
+    ["2,8,0"] = "minecraft:stone",
+    ["2,8,-1"] = "minecraft:diamond_ore",
+}
+
+local function getFrontCoord(pos)
+    local vecs = {
+        [0] = { x = 0, z = -1 },
+        [1] = { x = 1, z = 0 },
+        [2] = { x = 0, z = 1 },
+        [3] = { x = -1, z = 0 },
+    }
+    local v = vecs[pos.dir]
+    return pos.x + v.x, pos.y, pos.z + v.z
+end
+
+_G.turtle = {
+    getFuelLevel = function() return 5000 end,
+    getSelectedSlot = function() return 1 end,
+    select = function() return true end,
+    getItemCount = function() return 0 end,
+    getItemDetail = function() return nil end,
+    turnLeft = function() return true end,
+    turnRight = function() return true end,
+    detect = function()
+        local fx, fy, fz = getFrontCoord(miner2.pos)
+        return worldMap[("%d,%d,%d"):format(fx, fy, fz)] ~= nil
+    end,
+    detectUp = function()
+        return worldMap[("%d,%d,%d"):format(miner2.pos.x, miner2.pos.y + 1, miner2.pos.z)] ~= nil
+    end,
+    detectDown = function()
+        return worldMap[("%d,%d,%d"):format(miner2.pos.x, miner2.pos.y - 1, miner2.pos.z)] ~= nil
+    end,
+    inspect = function()
+        local fx, fy, fz = getFrontCoord(miner2.pos)
+        local b = worldMap[("%d,%d,%d"):format(fx, fy, fz)]
+        if b then return true, { name = b } end
+        return false, "No block"
+    end,
+    inspectUp = function()
+        local b = worldMap[("%d,%d,%d"):format(miner2.pos.x, miner2.pos.y + 1, miner2.pos.z)]
+        if b then return true, { name = b } end
+        return false, "No block"
+    end,
+    inspectDown = function()
+        local b = worldMap[("%d,%d,%d"):format(miner2.pos.x, miner2.pos.y - 1, miner2.pos.z)]
+        if b then return true, { name = b } end
+        return false, "No block"
+    end,
+    dig = function()
+        local fx, fy, fz = getFrontCoord(miner2.pos)
+        local k = ("%d,%d,%d"):format(fx, fy, fz)
+        table.insert(dugBlocks, { key = k, name = worldMap[k] })
+        worldMap[k] = nil
+        return true
+    end,
+    digUp = function()
+        local k = ("%d,%d,%d"):format(miner2.pos.x, miner2.pos.y + 1, miner2.pos.z)
+        table.insert(dugBlocks, { key = k, name = worldMap[k] })
+        worldMap[k] = nil
+        return true
+    end,
+    digDown = function()
+        local k = ("%d,%d,%d"):format(miner2.pos.x, miner2.pos.y - 1, miner2.pos.z)
+        table.insert(dugBlocks, { key = k, name = worldMap[k] })
+        worldMap[k] = nil
+        return true
+    end,
+    forward = function()
+        local fx, fy, fz = getFrontCoord(miner2.pos)
+        local k = ("%d,%d,%d"):format(fx, fy, fz)
+        if worldMap[k] ~= nil then return false end
+        table.insert(stepHistory, { x = fx, y = fy, z = fz })
+        return true
+    end,
+    up = function()
+        local k = ("%d,%d,%d"):format(miner2.pos.x, miner2.pos.y + 1, miner2.pos.z)
+        if worldMap[k] ~= nil then return false end
+        table.insert(stepHistory, { x = miner2.pos.x, y = miner2.pos.y + 1, z = miner2.pos.z })
+        return true
+    end,
+    down = function()
+        local k = ("%d,%d,%d"):format(miner2.pos.x, miner2.pos.y - 1, miner2.pos.z)
+        if worldMap[k] ~= nil then return false end
+        table.insert(stepHistory, { x = miner2.pos.x, y = miner2.pos.y - 1, z = miner2.pos.z })
+        return true
+    end,
+}
+
+-- Test 8A: Prefer moving down first before moving in the horizontal direction of the ore at (2, 8, -1)
+local reached = miner2:moveTo(2, 8, -1, true, true)
+assertTrue(reached, "miner2 reached and mined ore at (2, 8, -1)")
+assertEq(stepHistory[1].x, 0, "Step 1 X is 0 (moved straight down first)")
+assertEq(stepHistory[1].y, 9, "Step 1 Y is 9 (moved down first)")
+assertEq(stepHistory[2].x, 0, "Step 2 X is 0 (moved straight down second)")
+assertEq(stepHistory[2].y, 8, "Step 2 Y is 8 (reached ore Y level before moving horizontally)")
+assertEq(worldMap["2,8,-1"], nil, "target ore at (2, 8, -1) was dug")
+
+-- Test 8B: Encountering allthemodium:teleport_pad in the way -> must NOT break it, and must find another way around it!
+miner2.pos = { x = 0, y = 0, z = 0, dir = 0 }
+miner2.blockedCoords = {}
+stepHistory = {}
+dugBlocks = {}
+worldMap = {
+    ["0,-1,0"] = "allthemodium:teleport_pad", -- Directly below the turtle!
+    ["1,0,0"] = "minecraft:stone",            -- Breakable stone to the East
+    ["1,-1,0"] = "minecraft:stone",           -- Breakable stone along detour
+    ["1,-2,0"] = "minecraft:stone",           -- Breakable stone adjacent to target ore
+    ["0,-2,0"] = "minecraft:allthemodium_ore", -- Target ore below the teleport pad!
+}
+
+local reachedDetour = miner2:moveTo(0, -2, 0, true, true)
+assertTrue(reachedDetour, "miner2 found an alternative path around allthemodium:teleport_pad to mine the ore at (0, -2, 0)")
+assertEq(worldMap["0,-1,0"], "allthemodium:teleport_pad", "allthemodium:teleport_pad was NOT broken!")
+assertEq(worldMap["0,-2,0"], nil, "target ore below the teleport pad WAS mined via alternative path!")
+for _, d in ipairs(dugBlocks) do
+    assertTrue(d.name ~= "allthemodium:teleport_pad", "never dug allthemodium:teleport_pad")
+end
+
 print(("ALL %d ASSERTIONS PASSED!"):format(passed))
