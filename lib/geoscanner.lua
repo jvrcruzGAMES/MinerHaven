@@ -140,25 +140,95 @@ end
 GeoScanner.WASTE_BLOCKS = {
     ["minecraft:stone"] = true,
     ["minecraft:cobblestone"] = true,
+    ["minecraft:mossy_cobblestone"] = true,
     ["minecraft:deepslate"] = true,
     ["minecraft:cobbled_deepslate"] = true,
     ["minecraft:dirt"] = true,
+    ["minecraft:grass_block"] = true,
     ["minecraft:coarse_dirt"] = true,
+    ["minecraft:rooted_dirt"] = true,
+    ["minecraft:podzol"] = true,
+    ["minecraft:mycelium"] = true,
+    ["minecraft:mud"] = true,
+    ["minecraft:clay"] = true,
+    ["minecraft:clay_ball"] = true,
     ["minecraft:gravel"] = true,
     ["minecraft:sand"] = true,
+    ["minecraft:red_sand"] = true,
     ["minecraft:sandstone"] = true,
+    ["minecraft:red_sandstone"] = true,
     ["minecraft:tuff"] = true,
     ["minecraft:andesite"] = true,
     ["minecraft:diorite"] = true,
     ["minecraft:granite"] = true,
     ["minecraft:calcite"] = true,
     ["minecraft:dripstone_block"] = true,
+    ["minecraft:pointed_dripstone"] = true,
     ["minecraft:netherrack"] = true,
     ["minecraft:basalt"] = true,
+    ["minecraft:smooth_basalt"] = true,
     ["minecraft:blackstone"] = true,
     ["minecraft:end_stone"] = true,
     ["minecraft:flint"] = true,
+    ["minecraft:soul_sand"] = true,
+    ["minecraft:soul_soil"] = true,
+    ["minecraft:magma_block"] = true,
+    ["minecraft:terracotta"] = true,
+    ["minecraft:moss_block"] = true,
+    ["minecraft:moss_carpet"] = true,
+    ["allthemodium:ancient_stone"] = true,
+    ["allthemodium:ancient_dirt"] = true,
+    ["allthemodium:ancient_grass"] = true,
+    ["allthemodium:ancient_moss"] = true,
 }
+
+--- Check whether a block or item name is a common non-ore terrain/waste block.
+-- @tparam string name Block or item registry name
+-- @treturn boolean
+function GeoScanner.isWasteName(name)
+    if type(name) ~= "string" then
+        return false
+    end
+    local lower = name:lower()
+    if GeoScanner.WASTE_BLOCKS[lower] then
+        return true
+    end
+    local short = GeoScanner.shortName(lower)
+    if short:find("_ore", 1, true) or short:find("raw_", 1, true) or short == "redstone" or short == "gilded_blackstone" then
+        return false
+    end
+    if short == "dirt"
+        or short == "cobblestone"
+        or short == "stone"
+        or short == "deepslate"
+        or short == "cobbled_deepslate"
+        or short == "gravel"
+        or short == "sand"
+        or short == "sandstone"
+        or short == "tuff"
+        or short == "andesite"
+        or short == "diorite"
+        or short == "granite"
+        or short == "netherrack"
+        or short == "basalt"
+        or short == "blackstone"
+        or short == "end_stone"
+        or short == "limestone"
+        or short == "marble"
+        or short == "scoria"
+        or short == "slate"
+        or short == "gabbro"
+        or short == "dolomite"
+        or short:match("_dirt$")
+        or short:match("_cobblestone$")
+        or short:match("^cobbled_")
+        or short:match("_grass$")
+        or short:match("_stone$")
+    then
+        return true
+    end
+    return false
+end
 
 --- Determine whether an inventory item detail (from `turtle.getItemDetail(slot, true)`)
 -- represents a mined ore or raw ore drop.
@@ -170,7 +240,7 @@ function GeoScanner.isOreItem(itemDetail, trackedMinedItems)
         return false
     end
     local name = itemDetail.name:lower()
-    if GeoScanner.WASTE_BLOCKS[name] then
+    if GeoScanner.isWasteName(name) then
         return false
     end
     if trackedMinedItems and trackedMinedItems[name] then
@@ -186,10 +256,14 @@ function GeoScanner.isOreItem(itemDetail, trackedMinedItems)
             or lower == "c:raw_materials"
             or lower:match("^forge:raw_materials/")
             or lower:match("^c:raw_materials/")
+            or lower == "forge:gems"
+            or lower == "c:gems"
             or lower:match("^forge:gems/")
             or lower:match("^c:gems/")
-            or lower:match("^forge:dusts/redstone")
-            or lower:match("^c:dusts/redstone")
+            or lower:match("^forge:dusts/")
+            or lower:match("^c:dusts/")
+            or lower:match("^forge:nuggets/")
+            or lower:match("^c:nuggets/")
         then
             return true
         end

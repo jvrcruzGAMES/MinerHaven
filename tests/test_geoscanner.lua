@@ -503,4 +503,31 @@ assertEq(noFuelStatus, "no_fuel", "stepWorker returns no_fuel immediately when f
 assertEq(rotations, 0, "turtle does NOT rotate when out of fuel")
 assertTrue(miner2.lastAction:find("OUT OF FUEL", 1, true) ~= nil, "displays clear OUT OF FUEL message instead of Could not reach Iron Ore")
 
+-- Test 8D: Discarding non-ore blocks (dirt, cobblestone, etc.) while keeping ores and fuel
+local testInv = {
+    [1] = { name = "minecraft:raw_iron", count = 8, tags = { ["forge:raw_materials"] = true } },
+    [2] = { name = "minecraft:dirt", count = 32, tags = {} },
+    [3] = { name = "minecraft:cobblestone", count = 64, tags = {} },
+    [4] = { name = "minecraft:coal", count = 16, tags = {} },
+    [5] = { name = "minecraft:cobbled_deepslate", count = 20, tags = {} },
+}
+local selectedSlot = 1
+_G.turtle.select = function(s) selectedSlot = s; return true end
+_G.turtle.getSelectedSlot = function() return selectedSlot end
+_G.turtle.getItemCount = function(s) return testInv[s] and testInv[s].count or 0 end
+_G.turtle.getItemDetail = function(s) return testInv[s] end
+_G.turtle.dropDown = function()
+    testInv[selectedSlot] = nil
+    return true
+end
+_G.turtle.drop = _G.turtle.dropDown
+
+local droppedCount = miner2:dropWasteBlocks()
+assertEq(droppedCount, 3, "dropped 3 slots of non-ore blocks (dirt, cobblestone, cobbled_deepslate)")
+assertTrue(testInv[1] ~= nil, "kept raw_iron ore in slot 1")
+assertEq(testInv[2], nil, "discarded dirt in slot 2")
+assertEq(testInv[3], nil, "discarded cobblestone in slot 3")
+assertTrue(testInv[4] ~= nil, "kept coal fuel in slot 4")
+assertEq(testInv[5], nil, "discarded cobbled_deepslate in slot 5")
+
 print(("ALL %d ASSERTIONS PASSED!"):format(passed))

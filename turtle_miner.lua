@@ -327,11 +327,30 @@ function TurtleMiner:recordNewlyMinedItems(beforeCounts)
         if detail and detail.name then
             local name = detail.name:lower()
             local prev = beforeCounts[name] or 0
-            if (detail.count or 1) > prev and not GeoScanner.WASTE_BLOCKS[name] then
+            if (detail.count or 1) > prev and not GeoScanner.isWasteName(name) then
                 self.minedItems[name] = true
             end
         end
     end
+end
+
+--- Check if an item should be kept as fuel or a tool (so it isn't dropped as waste).
+function TurtleMiner:isFuelOrToolItem(detail)
+    if type(detail) ~= "table" or type(detail.name) ~= "string" then
+        return false
+    end
+    local name = detail.name:lower()
+    if name:find("pickaxe", 1, true)
+        or name:find("scanner", 1, true)
+        or name:find("coal", 1, true)
+        or name:find("charcoal", 1, true)
+        or name == "minecraft:lava_bucket"
+        or name == "minecraft:bucket"
+        or name == "minecraft:blaze_rod"
+    then
+        return true
+    end
+    return false
 end
 
 --- Check if all 16 turtle inventory slots are occupied.
@@ -383,7 +402,7 @@ function TurtleMiner:hasOresInInventory()
     return false
 end
 
---- Drop non-ore waste blocks (cobblestone, dirt, gravel, etc.) if needed to free up slots for ores.
+--- Discard (drop) all non-ore blocks (such as dirt, cobblestone, stone, deepslate, gravel, etc.).
 function TurtleMiner:dropWasteBlocks()
     if not turtle or not turtle.getItemDetail or not turtle.drop then
         return 0
@@ -391,15 +410,29 @@ function TurtleMiner:dropWasteBlocks()
     local droppedSlots = 0
     local prevSlot = turtle.getSelectedSlot and turtle.getSelectedSlot() or 1
     for slot = 1, 16 do
-        local detail = turtle.getItemDetail(slot, true)
-        if detail and detail.name and GeoScanner.WASTE_BLOCKS[detail.name:lower()] then
-            turtle.select(slot)
-            if turtle.dropDown then
-                turtle.dropDown()
-            else
-                turtle.drop()
+        local count = turtle.getItemCount and turtle.getItemCount(slot) or 0
+        if count > 0 then
+            local detail = turtle.getItemDetail(slot, true)
+            if detail and detail.name then
+                local isOre = GeoScanner.isOreItem(detail, self.minedItems)
+                local isFuelOrTool = self:isFuelOrToolItem(detail)
+                if not isOre and not isFuelOrTool then
+                    turtle.select(slot)
+                    local dropped = false
+                    if turtle.dropDown then
+                        dropped = turtle.dropDown()
+                    end
+                    if not dropped and turtle.drop then
+                        dropped = turtle.drop()
+                    end
+                    if not dropped and turtle.dropUp then
+                        dropped = turtle.dropUp()
+                    end
+                    if dropped then
+                        droppedSlots = droppedSlots + 1
+                    end
+                end
             end
-            droppedSlots = droppedSlots + 1
         end
     end
     if turtle.select then
@@ -548,11 +581,11 @@ function TurtleMiner:inspectDirection(inspectFn)
     return false, nil
 end
 
-function TurtleMiner:tryDigWithToolCheck(digFn)
+function TurtleMiner:tryDigWithToolCheck(digFn, isTargetOre)
     if not turtle or type(digFn) ~= "function" then
         return false, "no_dig_fn"
     end
-    local before = self:snapshotInventoryCounts()
+    local before = isTargetOre and self:snapshotInventoryCounts() or nil
     local ok, err = digFn()
     if not ok and type(err) == "string" and err:lower():find("no tool", 1, true) then
         if self:tryEquipPickaxe() then
@@ -560,7 +593,10 @@ function TurtleMiner:tryDigWithToolCheck(digFn)
         end
     end
     if ok then
-        self:recordNewlyMinedItems(before)
+        if isTargetOre and before then
+            self:recordNewlyMinedItems(before)
+        end
+        self:dropWasteBlocks()
     end
     return ok, err
 end
@@ -963,7 +999,7 @@ function TurtleMiner:moveTo(tx, ty, tz, stopAdjacent, respectStop)
                     return false
                 end
                 if turtle.digUp then
-                    local digOk, digErr = self:tryDigWithToolCheck(turtle.digUp)
+                    local digOk, digErr = self:tryDigWithToolCheck(turtle.digUp, true)
                     if not digOk and turtle.detectUp and turtle.detectUp() then
                         self.lastMoveError = tostring(digErr or "Cannot dig target above")
                         return false
@@ -976,7 +1012,7 @@ function TurtleMiner:moveTo(tx, ty, tz, stopAdjacent, respectStop)
                     return false
                 end
                 if turtle.digDown then
-                    local digOk, digErr = self:tryDigWithToolCheck(turtle.digDown)
+                    local digOk, digErr = self:tryDigWithToolCheck(turtle.digDown, true)
                     if not digOk and turtle.detectDown and turtle.detectDown() then
                         self.lastMoveError = tostring(digErr or "Cannot dig target below")
                         return false
@@ -990,7 +1026,7 @@ function TurtleMiner:moveTo(tx, ty, tz, stopAdjacent, respectStop)
                     return false
                 end
                 if turtle.dig then
-                    local digOk, digErr = self:tryDigWithToolCheck(turtle.dig)
+                    local digOk, digErr = self:tryDigWithToolCheck(turtle.dig, true)
                     if not digOk and turtle.detect and turtle.detect() then
                         self.lastMoveError = tostring(digErr or "Cannot dig target")
                         return false
@@ -1004,7 +1040,7 @@ function TurtleMiner:moveTo(tx, ty, tz, stopAdjacent, respectStop)
                     return false
                 end
                 if turtle.dig then
-                    local digOk, digErr = self:tryDigWithToolCheck(turtle.dig)
+                    local digOk, digErr = self:tryDigWithToolCheck(turtle.dig, true)
                     if not digOk and turtle.detect and turtle.detect() then
                         self.lastMoveError = tostring(digErr or "Cannot dig target")
                         return false
@@ -1018,7 +1054,7 @@ function TurtleMiner:moveTo(tx, ty, tz, stopAdjacent, respectStop)
                     return false
                 end
                 if turtle.dig then
-                    local digOk, digErr = self:tryDigWithToolCheck(turtle.dig)
+                    local digOk, digErr = self:tryDigWithToolCheck(turtle.dig, true)
                     if not digOk and turtle.detect and turtle.detect() then
                         self.lastMoveError = tostring(digErr or "Cannot dig target")
                         return false
@@ -1032,7 +1068,7 @@ function TurtleMiner:moveTo(tx, ty, tz, stopAdjacent, respectStop)
                     return false
                 end
                 if turtle.dig then
-                    local digOk, digErr = self:tryDigWithToolCheck(turtle.dig)
+                    local digOk, digErr = self:tryDigWithToolCheck(turtle.dig, true)
                     if not digOk and turtle.detect and turtle.detect() then
                         self.lastMoveError = tostring(digErr or "Cannot dig target")
                         return false
@@ -1179,28 +1215,21 @@ function TurtleMiner:stepWorker()
         end
     end
 
-    -- 2. Check if inventory is full
+    -- 2. Discard any non-ore waste blocks (dirt, cobblestone, etc.) and check if inventory is full of ores
+    self:dropWasteBlocks()
     if self:isInventoryFull() then
-        -- Try dropping waste cobble/dirt first ONLY if we haven't collected any ores yet;
-        -- otherwise return home with our full load!
-        if not self:hasOresInInventory() then
-            self:dropWasteBlocks()
+        self:returnToHome()
+        self.inWorkerStep = false
+        if not self.running then
+            return self:finishStopReturnHome()
         end
-        if self:isInventoryFull() then
-            self:returnToHome()
-            self.inWorkerStep = false
-            if not self.running then
-                return self:finishStopReturnHome()
-            end
-            if self:hasOresInInventory() then
-                self.phase = "WAITING AT HOME"
-                local _, oreCount = self:getInventoryStats()
-                self.lastAction = ("At Home (Full). Waiting for %d ore(s) to be unloaded..."):format(oreCount)
-                return "waiting_unload"
-            else
-                self:dropWasteBlocks()
-                return "returned_home"
-            end
+        if self:hasOresInInventory() then
+            self.phase = "WAITING AT HOME"
+            local _, oreCount = self:getInventoryStats()
+            self.lastAction = ("At Home (Full). Waiting for %d ore(s) to be unloaded..."):format(oreCount)
+            return "waiting_unload"
+        else
+            return "returned_home"
         end
     end
 
@@ -1304,7 +1333,8 @@ function TurtleMiner:stepWorker()
         return "move_blocked"
     end
 
-    -- Immediately check if inventory became full after mining this ore
+    -- Discard any non-ore blocks picked up while tunneling, then check if inventory is full of ores
+    self:dropWasteBlocks()
     if self:isInventoryFull() then
         self:returnToHome()
         if not self.running then
