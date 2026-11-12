@@ -492,4 +492,15 @@ for _, d in ipairs(dugBlocks) do
     assertTrue(d.name ~= "allthemodium:teleport_pad", "never dug allthemodium:teleport_pad")
 end
 
+-- Test 8C: When fuel is 0 (or block cannot be broken due to missing tool / claim), do NOT rotate or permanently block coordinates!
+local rotations = 0
+_G.turtle.getFuelLevel = function() return 0 end
+_G.turtle.turnLeft = function() rotations = rotations + 1; return true end
+_G.turtle.turnRight = function() rotations = rotations + 1; return true end
+
+local noFuelStatus = miner2:stepWorker()
+assertEq(noFuelStatus, "no_fuel", "stepWorker returns no_fuel immediately when fuel is 0")
+assertEq(rotations, 0, "turtle does NOT rotate when out of fuel")
+assertTrue(miner2.lastAction:find("OUT OF FUEL", 1, true) ~= nil, "displays clear OUT OF FUEL message instead of Could not reach Iron Ore")
+
 print(("ALL %d ASSERTIONS PASSED!"):format(passed))

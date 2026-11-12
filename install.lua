@@ -165,7 +165,8 @@ local function joinPath(base, rel)
 end
 
 local function downloadFile(remotePath, localPath)
-    local url = BASE_URL .. "/" .. remotePath
+    local cacheBuster = (os and type(os.epoch) == "function") and tostring(os.epoch("utc")) or tostring(math.random(100000, 999999))
+    local url = BASE_URL .. "/" .. remotePath .. "?v=" .. cacheBuster
     logInfo("Downloading " .. remotePath .. " -> " .. localPath)
 
     local response, err = http.get(url)
