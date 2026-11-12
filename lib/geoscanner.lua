@@ -111,30 +111,119 @@ function GeoScanner.hasTag(block, tag)
     return tagMap[clean] == true
 end
 
+--- Check whether a block or item table has an ore tag (e.g. `forge:ores`, `c:ores`, `minecraft:*_ores`).
+-- @tparam table block Block or item detail table with `.tags` or `.tagMap`
+-- @treturn boolean
+function GeoScanner.hasOreTag(block)
+    if type(block) ~= "table" then
+        return false
+    end
+    local tagMap = block.tagMap or GeoScanner.normalizeTags(block.tags)
+    for tag, _ in pairs(tagMap) do
+        local lower = tag:lower()
+        if GeoScanner.DEFAULT_ORE_TAGS[lower] then
+            return true
+        end
+        if lower:match("^forge:ores/")
+            or lower:match("^c:ores/")
+            or lower:match(":ores$")
+            or lower:match(":ores/")
+            or lower:match("_ores$")
+        then
+            return true
+        end
+    end
+    return false
+end
+
+--- Common non-ore waste blocks that turtles may dig through to reach ores.
+GeoScanner.WASTE_BLOCKS = {
+    ["minecraft:stone"] = true,
+    ["minecraft:cobblestone"] = true,
+    ["minecraft:deepslate"] = true,
+    ["minecraft:cobbled_deepslate"] = true,
+    ["minecraft:dirt"] = true,
+    ["minecraft:coarse_dirt"] = true,
+    ["minecraft:gravel"] = true,
+    ["minecraft:sand"] = true,
+    ["minecraft:sandstone"] = true,
+    ["minecraft:tuff"] = true,
+    ["minecraft:andesite"] = true,
+    ["minecraft:diorite"] = true,
+    ["minecraft:granite"] = true,
+    ["minecraft:calcite"] = true,
+    ["minecraft:dripstone_block"] = true,
+    ["minecraft:netherrack"] = true,
+    ["minecraft:basalt"] = true,
+    ["minecraft:blackstone"] = true,
+    ["minecraft:end_stone"] = true,
+    ["minecraft:flint"] = true,
+}
+
+--- Determine whether an inventory item detail (from `turtle.getItemDetail(slot, true)`)
+-- represents a mined ore or raw ore drop.
+-- @tparam table itemDetail Item detail table `{ name, count, tags }`
+-- @tparam[opt] table trackedMinedItems Optional lookup `{ [itemName] = true }` of items collected when mining ores
+-- @treturn boolean
+function GeoScanner.isOreItem(itemDetail, trackedMinedItems)
+    if type(itemDetail) ~= "table" or type(itemDetail.name) ~= "string" then
+        return false
+    end
+    local name = itemDetail.name:lower()
+    if GeoScanner.WASTE_BLOCKS[name] then
+        return false
+    end
+    if trackedMinedItems and trackedMinedItems[name] then
+        return true
+    end
+    if GeoScanner.hasOreTag(itemDetail) or GeoScanner.isOre(itemDetail) then
+        return true
+    end
+    local tagMap = itemDetail.tagMap or GeoScanner.normalizeTags(itemDetail.tags)
+    for tag, _ in pairs(tagMap) do
+        local lower = tag:lower()
+        if lower == "forge:raw_materials"
+            or lower == "c:raw_materials"
+            or lower:match("^forge:raw_materials/")
+            or lower:match("^c:raw_materials/")
+            or lower:match("^forge:gems/")
+            or lower:match("^c:gems/")
+            or lower:match("^forge:dusts/redstone")
+            or lower:match("^c:dusts/redstone")
+        then
+            return true
+        end
+    end
+    if name:match(":raw_")
+        or name == "minecraft:diamond"
+        or name == "minecraft:emerald"
+        or name == "minecraft:coal"
+        or name == "minecraft:redstone"
+        or name == "minecraft:lapis_lazuli"
+        or name == "minecraft:quartz"
+        or name == "minecraft:ancient_debris"
+        or name == "minecraft:gold_nugget"
+        or name == "minecraft:iron_nugget"
+    then
+        return true
+    end
+    return false
+end
+
 --- Determine whether a block table or block registry name represents an ore.
 -- @tparam table|string blockOrName Block table (with `.name` and optional `.tags`) or block name string
 -- @treturn boolean
 function GeoScanner.isOre(blockOrName)
     local name
-    local tagMap
     if type(blockOrName) == "string" then
         name = blockOrName
     elseif type(blockOrName) == "table" then
         name = blockOrName.name
-        tagMap = blockOrName.tagMap or GeoScanner.normalizeTags(blockOrName.tags)
+        if GeoScanner.hasOreTag(blockOrName) then
+            return true
+        end
     else
         return false
-    end
-
-    if tagMap then
-        for tag, _ in pairs(tagMap) do
-            if GeoScanner.DEFAULT_ORE_TAGS[tag] then
-                return true
-            end
-            if tag:match("^forge:ores/") or tag:match("^c:ores/") or tag:match(":ores$") then
-                return true
-            end
-        end
     end
 
     if type(name) == "string" then
@@ -209,6 +298,7 @@ function GeoScanner.enrichBlock(raw)
         euclidean = math.floor(euclidean * 10 + 0.5) / 10,
         direction = GeoScanner.formatDirection(x, y, z),
     }
+    enriched.hasOreTag = GeoScanner.hasOreTag(enriched)
     enriched.isOre = GeoScanner.isOre(enriched)
     return enriched
 end
@@ -556,6 +646,23 @@ function GeoScanner:scan(radius, opts)
     end
 
     return GeoScanner.filterBlocks(enriched, filterSpec, opts.sortBy)
+end
+
+--- Scan for ores by block tag (e.g. `#forge:ores`, `#c:ores`, `#minecraft:*_ores`) within `radius`.
+-- @tparam[opt=8] number radius Scan radius
+-- @tparam[opt] table opts Additional scan options
+-- @treturn table|nil, string|nil
+function GeoScanner:scanOresByTag(radius, opts)
+    local merged = {}
+    if type(opts) == "table" then
+        for k, v in pairs(opts) do
+            merged[k] = v
+        end
+    end
+    merged.filter = function(block)
+        return GeoScanner.hasOreTag(block)
+    end
+    return self:scan(radius, merged)
 end
 
 --- Scan for ores only within `radius` (convenience wrapper around `scan`).

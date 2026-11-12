@@ -14,18 +14,55 @@ Run the following one-liner on any CC: Tweaked computer, pocket computer, or tur
 wget run https://raw.githubusercontent.com/jvrcruzGAMES/MinerHaven/main/install.lua
 ```
 
-### Installer Flags
+### Installer Prompts & Flags
 
-- **Full install (default)**: installs `/lib/geoscanner.lua`, `/minerhaven.lua`, and registers the `minerhaven` and `mh` shell aliases.
-- **Library only (`--lib-only`)**: installs only `/lib/geoscanner.lua` for use in your own scripts:
-  ```lua
-  wget run https://raw.githubusercontent.com/jvrcruzGAMES/MinerHaven/main/install.lua --lib-only
-  ```
-- **Auto-start on boot (`--startup`)**: automatically opens the MinerHaven UI when the computer boots:
-  ```lua
-  wget run https://raw.githubusercontent.com/jvrcruzGAMES/MinerHaven/main/install.lua --startup
-  ```
-- **Custom directory (`--dir <path>`)**: installs files into a custom directory.
+When you run `install.lua`, it asks whether the installation is for a **Turtle** (auto-detecting if the `turtle` API is present):
+
+1. **Standard Computer / Pocket Computer Install**:
+   - Installs `/lib/geoscanner.lua` and `/minerhaven.lua`, and registers the `minerhaven` and `mh` aliases.
+2. **Turtle Install** (`y` at prompt, or `--turtle` flag):
+   - Installs `/lib/geoscanner.lua`, `/minerhaven.lua`, and the Turtle Auto-Miner `/turtle_miner.lua` (`miner` alias).
+   - **Prompts to set the Turtle's current location as its Home** and saves it to `/home.cfg` (along with `/turtle_pos.cfg`).
+   - Configures `/startup/99_minerhaven.lua` so the **Turtle Auto-Miner (`turtle_miner.lua`) loads automatically on startup**.
+
+#### CLI Flags for `install.lua`
+- `--turtle` / `--no-turtle`: Skip the prompt and force Turtle or non-Turtle installation.
+- `--set-home` / `--facing <n|e|s|w>`: Automatically set the turtle's current location as Home without prompting.
+- `--lib-only`: Install only `/lib/geoscanner.lua` for use in your own scripts.
+- `--startup`: Auto-start the `minerhaven` radar UI on boot (for non-turtle computers).
+- `--dir <path>`: Install files into a custom directory.
+
+---
+
+## Turtle Auto-Miner (`turtle_miner.lua` / `miner`)
+
+When installed for a Turtle, **MinerHaven Turtle Auto-Miner** loads automatically on startup and stays running on the turtle screen.
+
+### How It Works
+- **`start` instruction**:
+  1. Scans for nearby ores **by block tag** (`#forge:ores`, `#c:ores`, `#minecraft:*_ores`) using the Geo Scanner.
+  2. Navigates to and mines the nearest ores until the turtle's **16-slot inventory is full**.
+  3. Automatically **returns to its saved Home** (`/home.cfg`).
+  4. **Waits at Home** until its inventory has **no more ores** (e.g., unloaded by a player or hopper), then automatically resumes mining!
+- **`stop` instruction**:
+  - Immediately halts mining and transitions to **`IDLE (Stopped)`**.
+  - **Does not exit or terminate**—the program stays alive and idle until you give the `start` instruction again.
+
+### Controlling the Turtle Auto-Miner
+While the program is running on the Turtle screen, type a command and press **Enter** (or click the on-screen buttons on an Advanced Turtle):
+- `start` — Start mining nearby ores by tag.
+- `stop` — Pause/stop mining and stay idle until activated again.
+- `sethome [n|e|s|w]` — Save the turtle's current location as its Home in `/home.cfg`.
+- `return` (or `home`) — Stop mining and walk back to Home.
+- `shell` (or `quit`) — Exit to the CraftOS shell.
+
+You can also control it via CLI commands:
+```lua
+miner start           -- Start mining nearby ores
+miner stop            -- Stop and stay idle
+miner sethome n       -- Save current position (facing North) to /home.cfg
+miner status          -- Print current state, Home coordinates, and inventory ore count
+```
 
 ---
 

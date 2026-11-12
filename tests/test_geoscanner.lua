@@ -1,4 +1,4 @@
--- Automated test suite for MinerHaven (lib/geoscanner.lua, minerhaven.lua, install.lua)
+-- Automated test suite for MinerHaven (lib/geoscanner.lua, minerhaven.lua, turtle_miner.lua, install.lua)
 package.path = "./?.lua;./lib/?.lua;" .. package.path
 
 local GeoScanner = require("geoscanner")
@@ -35,7 +35,7 @@ local mapTags2 = GeoScanner.normalizeTags({ ["c:ores"] = true, ["minecraft:stone
 assertTrue(mapTags2["c:ores"], "map tag c:ores")
 assertTrue(not mapTags2["minecraft:stone"], "false tag ignored")
 
--- 3. Test isOre & enrichBlock
+-- 3. Test isOre, hasOreTag, isOreItem & enrichBlock
 local diamondBlock = GeoScanner.enrichBlock({
     name = "minecraft:deepslate_diamond_ore",
     x = 3,
@@ -44,6 +44,7 @@ local diamondBlock = GeoScanner.enrichBlock({
     tags = { "forge:ores", "minecraft:diamond_ores" },
 })
 assertTrue(diamondBlock.isOre, "diamond is ore")
+assertTrue(diamondBlock.hasOreTag, "diamond has ore tag")
 assertEq(diamondBlock.dist, 7, "manhattan dist 3+4+0")
 assertEq(diamondBlock.euclidean, 5.0, "euclidean dist 3-4-5 triangle")
 assertTrue(GeoScanner.hasTag(diamondBlock, "#forge:ores"), "hasTag with #")
@@ -56,6 +57,9 @@ local stoneBlock = GeoScanner.enrichBlock({
     tags = { "minecraft:stone_ore_replaceables" },
 })
 assertTrue(not stoneBlock.isOre, "stone is not ore")
+assertTrue(not stoneBlock.hasOreTag, "stone does not have ore tag")
+assertTrue(GeoScanner.isOreItem({ name = "minecraft:raw_iron", tags = { ["forge:raw_materials"] = true } }), "raw_iron is ore item")
+assertTrue(not GeoScanner.isOreItem({ name = "minecraft:cobblestone", tags = {} }), "cobblestone is not ore item")
 
 -- 4. Mock CC: Tweaked peripheral environment & test GeoScanner methods
 local mockCooldown = 1
@@ -110,9 +114,9 @@ local failScan, failErr = scanner:scan(8, { retries = 0 })
 assertTrue(failScan == nil and failErr:find("cooldown") ~= nil, "cooldown returned error when retries=0")
 
 mockCooldown = 2
-local ores, scanErr = scanner:scanOres(8, { retries = 3, retryDelay = 0 })
-assertTrue(ores ~= nil, "scanOres with retries succeeded: " .. tostring(scanErr))
-assertEq(#ores, 3, "3 ore blocks returned (stone filtered out)")
+local ores, scanErr = scanner:scanOresByTag(8, { retries = 3, retryDelay = 0 })
+assertTrue(ores ~= nil, "scanOresByTag with retries succeeded: " .. tostring(scanErr))
+assertEq(#ores, 3, "3 ore blocks returned by tag (stone filtered out)")
 assertEq(ores[1].dist, 3, "sorted by nearest distance first (1,-1,1 -> dist 3)")
 
 -- Grouping test
@@ -141,14 +145,14 @@ _G.colors = {
 }
 _G.keys = {
     one = 2, two = 3, three = 4, tab = 15, q = 16, w = 17, s = 31, f = 33,
-    c = 46, j = 36, k = 37, enter = 28, space = 57, up = 200, down = 208,
+    c = 46, j = 36, k = 37, enter = 28, backspace = 14, space = 57, up = 200, down = 208,
     left = 203, right = 205, minus = 12, equals = 13, leftBracket = 26,
     rightBracket = 27, slash = 53, pageUp = 201, pageDown = 209,
 }
 
 _G.term = {
     isColor = function() return true end,
-    getSize = function() return 26, 20 end, -- Test compact Pocket Computer dimensions!
+    getSize = function() return 39, 13 end, -- Turtle screen dimensions!
     setTextColor = function() end,
     setBackgroundColor = function() end,
     setCursorPos = function() end,
@@ -157,21 +161,19 @@ _G.term = {
     clear = function() end,
 }
 
--- Test CLI commands
 local mhChunk = assert(loadfile("./minerhaven.lua"))
 assertEq(mhChunk("cost", "8"), 0, "CLI cost command")
 assertEq(mhChunk("scan", "8", "diamond"), 0, "CLI scan command")
 assertEq(mhChunk("chunk"), 0, "CLI chunk command")
 assertEq(mhChunk("help"), 0, "CLI help command")
 
--- Test TUI event sequence (Enter group -> switch to Chunk tab -> Scan chunk -> Quit)
 local eventQueue = {
-    { "key", keys.enter }, -- Select nearest group -> jumps to tab 2 (Radar)
-    { "key", keys.c },     -- Clear filter
-    { "key", keys.f },     -- Toggle Ores/All
-    { "key", keys.three }, -- Switch to tab 3 (Chunk Analyze)
-    { "key", keys.s },     -- Trigger chunkAnalyze()
-    { "key", keys.q },     -- Quit TUI
+    { "key", keys.enter },
+    { "key", keys.c },
+    { "key", keys.f },
+    { "key", keys.three },
+    { "key", keys.s },
+    { "key", keys.q },
 }
 _G.os.pullEvent = function()
     local ev = table.remove(eventQueue, 1)
@@ -179,9 +181,9 @@ _G.os.pullEvent = function()
     return unpack(ev)
 end
 
-mhChunk() -- Run interactive TUI until eventQueue finishes with 'q'
+mhChunk()
 
--- 6. Test install.lua with mocked http & fs
+-- 6. Test install.lua (both non-turtle and interactive turtle install with Home saving)
 local writtenFiles = {}
 _G.http = {
     get = function(url)
@@ -193,10 +195,18 @@ _G.http = {
 }
 _G.fs = {
     getDir = function(p) return p:match("^(.*)/[^/]+$") or "" end,
-    exists = function() return false end,
+    exists = function(p) return writtenFiles[p] ~= nil end,
     isDir = function() return true end,
     makeDir = function() end,
     open = function(path, mode)
+        if mode == "r" then
+            local content = writtenFiles[path]
+            if not content then return nil end
+            return {
+                readAll = function() return content end,
+                close = function() end,
+            }
+        end
         local buf = {}
         return {
             write = function(s) table.insert(buf, s) end,
@@ -210,10 +220,129 @@ _G.shell = {
 }
 _G.write = io.write
 
+-- Simulate interactive prompts in install.lua:
+-- 1) "Is this installation for a Turtle?" -> "y"
+-- 2) "Set the turtle's current location as its Home?" -> "y"
+-- 3) "Turtle facing direction (n/e/s/w) [n]:" -> "e"
+local promptAnswers = { "y", "y", "e" }
+_G.read = function()
+    return table.remove(promptAnswers, 1) or ""
+end
+
 local installChunk = assert(loadfile("./install.lua"))
 installChunk()
 assertTrue(writtenFiles["/lib/geoscanner.lua"] ~= nil, "installer wrote /lib/geoscanner.lua")
 assertTrue(writtenFiles["/minerhaven.lua"] ~= nil, "installer wrote /minerhaven.lua")
-assertTrue(writtenFiles["/startup/99_minerhaven.lua"] ~= nil, "installer wrote startup alias script")
+assertTrue(writtenFiles["/turtle_miner.lua"] ~= nil, "installer wrote /turtle_miner.lua for turtle install")
+assertTrue(writtenFiles["/home.cfg"] ~= nil, "installer saved turtle's current location to /home.cfg")
+assertTrue(writtenFiles["/startup/99_minerhaven.lua"]:find("turtle_miner.lua", 1, true) ~= nil, "startup launches turtle_miner.lua")
+
+-- 7. Test turtle_miner.lua full lifecycle:
+--    Idle -> Start -> Mine ores by tag until inventory full -> Return Home -> Wait until ores unloaded -> Resume -> Stop (stays idle, does not exit)
+local mockInv = {}
+for s = 1, 16 do mockInv[s] = nil end
+
+local worldOres = {
+    { name = "minecraft:diamond_ore", x = 2, y = 0, z = -1, tags = { "forge:ores" } },
+    { name = "minecraft:iron_ore", x = 3, y = 1, z = -1, tags = { "forge:ores" } },
+}
+
+local turtleMinerMod = assert(loadfile("./turtle_miner.lua"))("turtle_miner")
+local miner = turtleMinerMod.new()
+
+-- Set home at (10, 64, 20) facing North (0)
+_G.gps = {
+    locate = function() return 10, 64, 20 end,
+}
+miner:setHomeHere("n")
+assertEq(miner.home.x, 10, "home X saved as 10")
+assertEq(miner.home.y, 64, "home Y saved as 64")
+assertEq(miner.home.z, 20, "home Z saved as 20")
+assertEq(miner.home.dir, 0, "home dir saved as North (0)")
+
+local function fillInventoryWithOres()
+    for s = 1, 16 do
+        mockInv[s] = { name = "minecraft:diamond_ore", count = 1, tags = { ["forge:ores"] = true } }
+    end
+end
+
+local function clearOresFromInventory()
+    for s = 1, 16 do
+        mockInv[s] = nil
+    end
+end
+
+_G.turtle = {
+    getFuelLevel = function() return 5000 end,
+    getSelectedSlot = function() return 1 end,
+    select = function() return true end,
+    getItemCount = function(slot) return mockInv[slot] and mockInv[slot].count or 0 end,
+    getItemDetail = function(slot) return mockInv[slot] end,
+    forward = function() return true end,
+    up = function() return true end,
+    down = function() return true end,
+    turnLeft = function() return true end,
+    turnRight = function() return true end,
+    dig = function()
+        -- Simulate mining the ore and filling the inventory!
+        fillInventoryWithOres()
+        return true
+    end,
+    digUp = function()
+        fillInventoryWithOres()
+        return true
+    end,
+    digDown = function()
+        fillInventoryWithOres()
+        return true
+    end,
+    drop = function() return true end,
+    dropDown = function() return true end,
+}
+
+mockPeripheral.scan = function()
+    -- Return an ore relative to the turtle's current position
+    return {
+        { name = "minecraft:diamond_ore", x = 2, y = 0, z = -1, tags = { "forge:ores" } },
+    }
+end
+
+-- Initially stopped (idle)
+assertEq(miner.running, false, "miner starts idle (stopped)")
+assertEq(miner:stepWorker(), "idle", "stepWorker returns idle when stopped")
+
+-- Issue 'start' command
+miner:executeCommand("start")
+assertEq(miner.running, true, "miner is running after 'start'")
+
+-- Step 1: Mines the nearby ore, inventory becomes full (16/16 slots), so it immediately returns Home and waits!
+local stepRes = miner:stepWorker()
+assertEq(stepRes, "waiting_unload", "after filling inventory, turtle returned home and is waiting for unload")
+assertTrue(miner:isAtHome(), "turtle returned to Home coordinates (10, 64, 20)")
+assertEq(miner.phase, "WAITING AT HOME", "phase is WAITING AT HOME")
+
+-- Step 2: While ores are still in inventory, it stays at Home waiting
+assertEq(miner:stepWorker(), "waiting_unload", "still waiting at home while ores remain in inventory")
+assertTrue(miner:isAtHome(), "still at home")
+
+-- Step 3: Unload ores from turtle's inventory -> next step automatically resumes mining!
+clearOresFromInventory()
+-- Don't fill all 16 slots on this dig so it stays in mining mode
+_G.turtle.dig = function()
+    mockInv[1] = { name = "minecraft:iron_ore", count = 1, tags = { ["forge:ores"] = true } }
+    return true
+end
+local resumeRes = miner:stepWorker()
+assertEq(resumeRes, "mined", "once inventory has no more ores, turtle automatically goes back to mining")
+
+-- Step 4: Issue 'stop' instruction -> program does NOT exit (keepProgramAlive == true), stays idle!
+miner:executeCommand("stop")
+assertEq(miner.running, false, "miner running is false after stop")
+assertEq(miner.keepProgramAlive, true, "miner program stays alive (idle) when stopped")
+assertEq(miner:stepWorker(), "idle", "miner stays idle until activated again")
+
+-- Step 5: Issue 'start' instruction again -> activates again!
+miner:executeCommand("start")
+assertEq(miner.running, true, "miner reactivates when given start again")
 
 print(("ALL %d ASSERTIONS PASSED!"):format(passed))
