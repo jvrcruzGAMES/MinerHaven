@@ -161,27 +161,29 @@ _G.term = {
     clear = function() end,
 }
 
-local mhChunk = assert(loadfile("./minerhaven.lua"))
-assertEq(mhChunk("cost", "8"), 0, "CLI cost command")
-assertEq(mhChunk("scan", "8", "diamond"), 0, "CLI scan command")
-assertEq(mhChunk("chunk"), 0, "CLI chunk command")
-assertEq(mhChunk("help"), 0, "CLI help command")
-
-local eventQueue = {
-    { "key", keys.enter },
-    { "key", keys.c },
-    { "key", keys.f },
-    { "key", keys.three },
-    { "key", keys.s },
-    { "key", keys.q },
+-- 5. Test startup.lua
+local startupExecuted = nil
+_G.shell = {
+    run = function(path) startupExecuted = path; return true end,
+    setAlias = function() end,
 }
-_G.os.pullEvent = function()
-    local ev = table.remove(eventQueue, 1)
-    if not ev then return "key", keys.q end
-    return unpack(ev)
+_G.fs = _G.fs or {}
+local realFsExists = _G.fs.exists
+_G.fs.exists = function(p)
+    if p == "controller/main.lua" then return true end
+    return false
 end
+local startupChunk = assert(loadfile("./startup.lua"))
+startupChunk()
+assertEq(startupExecuted, "controller/main.lua", "startup.lua ran controller/main.lua")
 
-mhChunk()
+-- Test worker startup
+_G.fs.exists = function(p)
+    if p == "worker/main.lua" then return true end
+    return false
+end
+startupChunk()
+assertEq(startupExecuted, "worker/main.lua", "startup.lua ran worker/main.lua")
 
 -- 6. Test install.lua (both non-turtle and interactive turtle install with Home saving)
 local writtenFiles = {}
@@ -221,10 +223,9 @@ _G.shell = {
 _G.write = io.write
 
 -- Simulate interactive prompts in install.lua:
--- 1) "Is this installation for a Turtle?" -> "y"
--- 2) "Set the turtle's current location as its Home?" -> "y"
--- 3) "Turtle facing direction (n/e/s/w) [n]:" -> "e"
-local promptAnswers = { "y", "y", "e" }
+-- 1) "Which component is this? (c = Controller, w = Worker Turtle)" -> "c"
+-- 2) "Run MinerHaven automatically on boot?" -> "y"
+local promptAnswers = { "c", "y" }
 _G.read = function()
     return table.remove(promptAnswers, 1) or ""
 end
@@ -232,10 +233,11 @@ end
 local installChunk = assert(loadfile("./install.lua"))
 installChunk()
 assertTrue(writtenFiles["/lib/geoscanner.lua"] ~= nil, "installer wrote /lib/geoscanner.lua")
-assertTrue(writtenFiles["/minerhaven.lua"] ~= nil, "installer wrote /minerhaven.lua")
-assertTrue(writtenFiles["/turtle_miner.lua"] ~= nil, "installer wrote /turtle_miner.lua for turtle install")
-assertTrue(writtenFiles["/home.cfg"] ~= nil, "installer saved turtle's current location to /home.cfg")
-assertTrue(writtenFiles["/startup/99_minerhaven.lua"]:find("turtle_miner.lua", 1, true) ~= nil, "startup launches turtle_miner.lua")
+assertTrue(writtenFiles["/lib/crypto/main.lua"] ~= nil, "installer wrote /lib/crypto/main.lua")
+assertTrue(writtenFiles["/lib/workernet/main.lua"] ~= nil, "installer wrote /lib/workernet/main.lua")
+assertTrue(writtenFiles["/controller/main.lua"] ~= nil, "installer wrote /controller/main.lua for controller install")
+assertTrue(writtenFiles["/controller/lib/ores/main.lua"] ~= nil, "installer wrote /controller/lib/ores/main.lua")
+assertTrue(writtenFiles["/startup.lua"] ~= nil, "installer wrote /startup.lua")
 
 -- 7. Test turtle_miner.lua full lifecycle:
 --    Idle -> Start -> Mine ores by tag until inventory full -> Return Home -> Wait until ores unloaded -> Resume -> Stop (stays idle, does not exit)
@@ -787,14 +789,15 @@ assertEq(chunkStep3, "waiting_unload", "once chunk has 0 ores left, turtle telep
 assertTrue(miner3:isAtHome(), "turtle teleported back to Home after finishing chunk")
 assertEq(miner3.chunkOresRemaining, 0, "chunkOresRemaining is 0")
 
--- 10. Test 2-Computer Strategy (Base Advanced Computer + End Automata Turtle + Sophisticated Storage Barrel + Ender Modems):
---     10A: Installer asks which computer it is ("b" for Base Computer) and installs /base_computer.lua
+-- 10. Test 2-Computer Strategy (Controller Advanced Computer + End Automata Turtle + Sophisticated Storage Barrel + Ender Modems):
+--     10A: Installer asks which computer it is ("c" for Controller) and installs controller files
 writtenFiles = {}
-promptAnswers = { "b" }
+promptAnswers = { "c", "y" }
 installChunk()
-assertTrue(writtenFiles["/base_computer.lua"] ~= nil, "installer wrote /base_computer.lua when 'b' (Base Computer) is chosen")
-assertTrue(writtenFiles["/base_config.cfg"] ~= nil, "installer wrote /base_config.cfg for Base Computer")
-assertTrue(writtenFiles["/startup/99_minerhaven.lua"]:find("base_computer.lua", 1, true) ~= nil, "startup launches base_computer.lua on Base Computer")
+assertTrue(writtenFiles["/controller/main.lua"] ~= nil, "installer wrote /controller/main.lua when 'c' (Controller) is chosen")
+assertTrue(writtenFiles["/controller/main.cfg"] ~= nil, "installer wrote /controller/main.cfg for Controller")
+assertTrue(writtenFiles["/controller/lib/ores/main.lua"] ~= nil, "installer wrote /controller/lib/ores/main.lua")
+assertTrue(writtenFiles["/startup.lua"] ~= nil, "installer wrote /startup.lua")
 
 --     10B: Verify all Base blocks are in the forbidden blocks list so the Turtle will never break its base
 assertTrue(miner3:isProtectedBlock("computercraft:computer_advanced"), "Base Advanced Computer is forbidden")
@@ -1179,5 +1182,160 @@ test12Inv[1] = { name = "minecraft:coal", count = 64 }
 miner5.oreQueue = { { name = "minecraft:diamond_ore", x = 1, y = 0, z = 0, fromHome = true } }
 local resumeStep = miner5:stepWorker()
 assertEq(miner5.phase, "MINING", "Turtle resumes mining once coal is placed in inventory")
+
+-- 13. Test New Architecture: libcrypto, libworkernet, Pairing, Controller & Headless Worker
+local Crypto = dofile("lib/crypto/main.lua")
+local Workernet = dofile("lib/workernet/main.lua")
+local Device = dofile("worker/lib/device/main.lua")
+local Pairing = dofile("controller/lib/pairing/main.lua")
+local Controller = dofile("controller/controller.lua")
+local Ores = dofile("controller/lib/ores/main.lua")
+local Worker = dofile("worker/worker.lua")
+
+-- 13.1 libcrypto verification
+assertEq(Crypto.sha256(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "SHA-256 empty string")
+assertEq(Crypto.sha256("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "SHA-256 'abc'")
+assertEq(Crypto.hmacSha256("key", "The quick brown fox jumps over the lazy dog"), "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8", "HMAC-SHA256 test vector")
+
+local pairCode = Crypto.generatePairCode()
+assertEq(#pairCode, 6, "Pair code is 6 digits")
+assertTrue(pairCode:match("^%d%d%d%d%d%d$") ~= nil, "Pair code is numeric")
+local normCode, normErr = Crypto.normalizePairCode(" 482 - 915 ")
+assertEq(normCode, "482915", "Pair code normalization strips spaces and dashes")
+
+local kdfKey = Crypto.kdf("secret", "salt", "info", 32)
+local enc = Crypto.encrypt(kdfKey, "Hello CC:Tweaked Worker", "nonce123")
+local dec = Crypto.decrypt(kdfKey, enc, "nonce123")
+assertEq(dec, "Hello CC:Tweaked Worker", "CTR mode encrypt/decrypt")
+
+-- 13.2 libworkernet secure transport & replay protection
+local testNetBus = {}
+local mockNetModemA = {
+    isOpen = function() return true end,
+    open = function() end,
+    close = function() end,
+    transmit = function(ch, rep, pkt) table.insert(testNetBus, { ch = ch, pkt = pkt }) end,
+}
+local nodeA = Workernet.new({ modem = mockNetModemA, localId = 100 })
+local nodeB = Workernet.new({ modem = mockNetModemA, localId = 200 })
+nodeA:setSessionKey(200, kdfKey)
+nodeB:setSessionKey(100, kdfKey)
+
+assertTrue(nodeA:send(200, { type = "status", text = "secure payload" }), "NodeA send encrypted")
+assertEq(#testNetBus, 1, "packet sent to bus")
+local pkt = testNetBus[1].pkt
+assertEq(pkt.from, 100, "pkt from")
+assertEq(pkt.to, 200, "pkt to")
+assertTrue(pkt.sig ~= nil, "pkt has HMAC signature")
+
+local unpacked, sender, unErr = nodeB:unpackPacket(pkt)
+assertEq(unErr, nil, "no unpack error")
+assertEq(sender, 100, "sender is node 100")
+assertEq(unpacked.text, "secure payload", "decrypted payload match")
+
+-- Replay check
+local _, _, repErr = nodeB:unpackPacket(pkt)
+assertTrue(repErr and repErr:match("Replay"), "detected replay attack on duplicate sequence")
+
+-- 13.3 6-Digit Numeric Pairing Handshake
+local testPairBus = {}
+local makePairModem = function(id)
+    return {
+        isOpen = function() return true end,
+        open = function() end,
+        close = function() end,
+        transmit = function(ch, rep, pkt) table.insert(testPairBus, { ch = ch, pkt = pkt }) end,
+    }
+end
+local netCtrl = Workernet.new({ modem = makePairModem(1), localId = 1 })
+local netWork = Workernet.new({ modem = makePairModem(5), localId = 5 })
+
+netCtrl.pullMessage = function(self)
+    for i, m in ipairs(testPairBus) do
+        if m.ch == self.pairChannel or m.ch == self.channel then
+            table.remove(testPairBus, i)
+            return m.pkt, m.pkt and m.pkt.from or nil, m.ch
+        end
+    end
+    return nil
+end
+netWork.pullMessage = function(self)
+    for i, m in ipairs(testPairBus) do
+        if m.ch == self.pairChannel or m.ch == self.channel then
+            table.remove(testPairBus, i)
+            return m.pkt, m.pkt and m.pkt.from or nil, m.ch
+        end
+    end
+    return nil
+end
+
+local workerPairCode = "654321"
+-- Controller initiates pairing with code 654321
+local cNonce = "11223344"
+local pairReq = {
+    type = "pair_req",
+    controller_id = 1,
+    nonce = cNonce,
+    sig = Crypto.hmacSha256(workerPairCode, "pair_req:1:" .. cNonce)
+}
+table.insert(testPairBus, { ch = netWork.pairChannel, pkt = pairReq })
+
+-- Worker receives pair_req
+local wMsg = netWork:pullMessage()
+assertTrue(Crypto.verifySignature(workerPairCode, "pair_req:1:" .. cNonce, wMsg.sig), "Worker verified pair_req signature")
+local wNonce = "55667788"
+local derivedKeyWorker = Crypto.kdf(workerPairCode, cNonce .. wNonce, "minerhaven_session_v1", 32)
+local pairAck = {
+    type = "pair_ack",
+    worker_id = 5,
+    nonce = wNonce,
+    c_nonce = cNonce,
+    sig = Crypto.hmacSha256(workerPairCode, "pair_ack:5:" .. wNonce .. ":" .. cNonce)
+}
+table.insert(testPairBus, { ch = netCtrl.pairChannel, pkt = pairAck })
+
+-- Controller receives pair_ack
+local cAck = netCtrl:pullMessage()
+assertTrue(Crypto.verifySignature(workerPairCode, "pair_ack:5:" .. wNonce .. ":" .. cNonce, cAck.sig), "Controller verified pair_ack signature")
+local derivedKeyController = Crypto.kdf(workerPairCode, cNonce .. wNonce, "minerhaven_session_v1", 32)
+assertEq(derivedKeyWorker, derivedKeyController, "Controller and Worker derived identical cryptographic session key")
+
+-- 13.4 Authoritative Scan Radius Enforcement
+-- Create Controller with scanRadius = 12
+local testCtrl = Controller.new({ scanRadius = 12 })
+assertEq(testCtrl.config.scanRadius, 12, "Controller initialized with radius 12")
+
+-- Protected blocks check in Ores
+assertTrue(Ores.isProtectedBlock("computercraft:turtle_advanced"), "Turtle is protected")
+assertTrue(Ores.isProtectedBlock("advancedperipherals:geo_scanner"), "GeoScanner is protected")
+assertTrue(Ores.isProtectedBlock("fluxnetworks:flux_plug"), "Flux Plug is protected")
+assertTrue(Ores.isProtectedBlock("fluxnetworks:flux_point"), "Flux Point is protected")
+assertTrue(Ores.isProtectedBlock("sophisticatedstorage:diamond_barrel"), "Sophisticated barrel is protected")
+assertTrue(Ores.isProtectedBlock("mekanism:basic_energy_cube"), "Energy cube is protected")
+
+-- Mock scanner returning blocks
+local scanMockBlocks = {
+    { name = "minecraft:stone", x = 1, y = 0, z = 0 },
+    { name = "computercraft:turtle_advanced", x = 1, y = 0, z = 1 }, -- turtle home spot
+    { name = "minecraft:diamond_ore", x = 3, y = -5, z = 2 },
+    { name = "minecraft:iron_ore", x = -2, y = 1, z = 4 },
+}
+testCtrl.ores.rawScan = function(self, r)
+    assertEq(r, 12, "AUTHORITATIVE: Scanner was called with Controller's configured radius (12), not overridden!")
+    return scanMockBlocks
+end
+
+testCtrl.net.send = function(self, targetId, payload)
+    assertEq(payload.type, "ore_locations", "Payload is ore_locations")
+    assertEq(payload.scanRadius, 12, "Authoritative radius 12 sent in payload")
+    assertEq(#payload.ores, 2, "2 ores found")
+    return true
+end
+
+-- Simulate turtle sending request_ores (which previously had requestedRadius = 8)
+testCtrl:handlePacket({ type = "request_ores", radius = 8 }, 5)
+assertEq(testCtrl.lastScanOres, 2, "Controller scanned and sent 2 ores using authoritative radius 12")
+assertEq(testCtrl.ores.turtleOffset.x, 1, "Turtle offset X calibrated from scan")
+assertEq(testCtrl.ores.turtleOffset.z, 1, "Turtle offset Z calibrated from scan")
 
 print(("ALL %d ASSERTIONS PASSED!"):format(passed))

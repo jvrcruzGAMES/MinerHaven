@@ -1,213 +1,105 @@
 # MinerHaven
 
-A lightweight, reusable **CC: Tweaked** toolkit and interactive terminal interface (TUI + CLI) for the [Advanced Peripherals Geo Scanner](https://docs.advanced-peripherals.de/0.7/peripherals/geo_scanner/).
+A modular, secure **CC: Tweaked** automated mining fleet and telemetry system for Minecraft with the [Advanced Peripherals Geo Scanner](https://docs.advanced-peripherals.de/0.7/peripherals/geo_scanner/) and [End Automata](https://docs.advanced-peripherals.de/0.7/turtles/metaphysics/end_automata/).
 
-Works out of the box on **Pocket Computers**, **Turtles**, and **Standard / Advanced Computers** across both Advanced Peripherals `0.7` (`geoScanner`) and `0.8` / Minecraft `1.21.1+` (`geo_scanner`).
+---
+
+## Architecture Overview
+
+MinerHaven is structured around a **Controller & Headless Worker** architecture communicating over an encrypted transport layer:
+
+```
+MinerHaven/
+├── startup.lua                  # Universal startup script; launches installed component
+├── install.lua                  # Automated remote installer
+├── controller/                  # Base Advanced Computer (Home Base)
+│   ├── main.lua                 # Controller entry point
+│   ├── dashboard.lua            # Real-time TUI dashboard & command terminal
+│   ├── pairing.lua              # Controller-side pairing handler
+│   ├── controller.lua           # Core controller logic & fleet coordinator
+│   ├── main.cfg                 # Centralized configuration (authoritative radius, channels)
+│   └── lib/
+│       ├── ores/main.lua        # libores: GeoScanner management & base block protection
+│       └── pairing/main.lua     # libpairing: Fleet pairing & session key manager
+├── worker/                      # Mining Turtle (Worker)
+│   ├── main.lua                 # Worker entry point (runs pairing or worker)
+│   ├── pairing.lua              # Headless pairing display (shows 6-digit numeric code)
+│   ├── worker.lua               # Headless worker logic & mining state machine
+│   └── lib/
+│       └── device/main.lua      # libdevice: Worker pairing handshake & device identity
+└── lib/                         # Shared Core Libraries
+    ├── crypto/main.lua          # libcrypto: SHA-256, HMAC-SHA256, CTR cipher, HKDF
+    ├── workernet/main.lua       # libworkernet: Encrypted transport, HMAC signatures, replay defense
+    └── geoscanner.lua           # Geo Scanner utilities & tag normalization
+```
+
+---
+
+## Key Features
+
+1. **Authoritative Scan Radius**:
+   - The scan radius configured on the Controller is the authoritative source of truth.
+   - Turtle requests cannot override the controller's active radius.
+2. **Cryptographic Transport Layer (`libworkernet`)**:
+   - Every packet transmitted over wireless / Ender Modem is encrypted using an **HMAC-CTR stream cipher** and signed with **HMAC-SHA256**.
+   - Built-in sequence numbers and replay-attack protection.
+3. **6-Digit Numeric Pairing (`libpairing` & `libdevice`)**:
+   - When unpaired, the Worker displays a randomly generated **6-digit numeric pair code** (e.g. `482 915`).
+   - Entering this code in the Controller initiates a cryptographic challenge-response handshake deriving a shared 256-bit session key via HKDF.
+4. **Headless Turtles**:
+   - Once paired, turtles are fully headless: their screen shows a live status read-out, with all commands (`start`, `stop`, `scan`, `radius`) remotely controlled from the Controller dashboard.
+5. **End Automata Warp & Navigation**:
+   - Teleports directly to Home via `warpToPoint("home")` with alignment.
+   - Falls back to native pickaxe digging pathfinding if the End Automata breaks or lacks fuel.
+6. **Native Digging & Java NPE Workaround**:
+   - Automatically equips pickaxes to bypass the Advanced Peripherals 0.8.2a `APFakePlayer.awardStat` null-pointer exception when breaking netherrack/blocks.
+7. **Fuel Stack Retention & Emergency Return**:
+   - Keeps up to a full stack (64) of coal/charcoal during barrel unloading, depositing only excess.
+   - Retains Mekanism Energy Cubes in inventory for charging.
+   - **Emergency Return**: If coal count drops to 0 while in the field, the turtle immediately teleports home.
+8. **Protected Base Blocks**:
+   - Strictly preserves base blocks: Computers, Modems, Geo Scanners, Sophisticated Storage Barrels, Energy Cubes, Flux Plugs/Points (`fluxnetworks:*`), Teleport Pads, and Bedrock.
+9. **Waste Placement**:
+   - Places waste blocks (`cobblestone`, `netherrack`, `dirt`, `stone`) behind in its path.
 
 ---
 
 ## Quick Install (In-Game)
 
-Run the following one-liner on any CC: Tweaked computer, pocket computer, or turtle with an attached Geo Scanner (requires HTTP API enabled):
+Run on your CC: Tweaked computer or turtle (requires HTTP enabled):
 
 ```lua
 wget run https://raw.githubusercontent.com/jvrcruzGAMES/MinerHaven/main/install.lua
 ```
 
-### Installer Prompts & Flags
+### Installation Roles
 
-When you run `install.lua`, it asks **which computer this installation is for** (`b = Base Computer`, `t = Turtle`):
+The installer asks which component you are setting up:
+- `c` (or `--controller`): Installs Controller software for the Base Computer.
+- `w` (or `--worker`): Installs Worker software for the Mining Turtle.
 
-1. **Base Computer Install** (`b` at prompt, or `--base` flag):
-   - Installs `/lib/geoscanner.lua`, `/minerhaven.lua`, and the Base Computer Controller `/base_computer.lua` (`base` alias).
-   - Configures `/startup/99_minerhaven.lua` so the **Base Computer Controller (`base_computer.lua`) loads automatically on startup**, scanning with the attached Geo Scanner and passing ore locations to the Turtle over the Ender Modem.
-2. **Turtle Install** (`t` at prompt, or `--turtle` flag):
-   - Installs `/lib/geoscanner.lua`, `/minerhaven.lua`, and the Turtle Auto-Miner `/turtle_miner.lua` (`miner` alias).
-   - **Prompts to set the Turtle's current location as its Home** (default facing **North**, reprogrammable via `n/e/s/w`), saves `/home.cfg`, and registers the `"home"` warp point on the attached **End Automata** (`savePoint("home")`).
-   - Configures `/startup/99_minerhaven.lua` so the **Turtle Auto-Miner (`turtle_miner.lua`) loads automatically on startup**.
-
-#### CLI Flags for `install.lua`
-- `--base`: Skip the prompt and install for the **Base Advanced Computer**.
-- `--turtle`: Skip the prompt and install for the **Turtle**.
-- `--set-home` / `--facing <n|e|s|w>`: Automatically set the turtle's current location and facing as Home without prompting.
-- `--lib-only`: Install only `/lib/geoscanner.lua` for use in your own scripts.
-- `--dir <path>`: Install files into a custom directory.
-
----
-
-## 2-Computer Strategy (`base_computer.lua` + `turtle_miner.lua`)
-
-### Base Setup
-1. **Base Advanced Computer** (placed to the side of the Turtle) with an **Ender Modem** and the **Geo Scanner** attached.
-2. **End Automata Turtle** (default facing **North** toward the barrel, reprogrammable) with an **Ender Modem** and an **End Automata Core** (plus an **Energy Cube** in its inventory for fuel).
-3. **Sophisticated Storage Barrel** placed adjacent to the Turtle at the base.
-
-### How the Cycle Works
-1. **Base Computer Scans & Passes Ore Locations**:
-   - The Base Computer (`base_computer.lua`) scans with the **Geo Scanner**, automatically calibrates the Turtle's Home offset relative to the scanner, and sends the list of **Ore locations** (plus all forbidden **Base block coordinates**) to the Turtle over the **Ender Modem**.
-2. **Turtle Mines Passed Ore Locations**:
-   - The Turtle (`turtle_miner.lua`) goes and mines the passed ore locations:
-     - **Down-first movement priority**: Moves **down (`-Y`)** first before moving horizontally (`X/Z`).
-     - **Places Waste Blocks in Path**: Places non-ore waste blocks (`cobblestone`, `dirt`, `cobbled_deepslate`, `stone`, etc.) in its path instead of dropping them.
-     - **Forbidden Base Blocks & Teleport Pad Protection**: Never breaks any Base blocks (`computercraft:*`, `advancedperipherals:*`, `sophisticatedstorage:*`, `mekanism:*_energy_cube`, `fluxnetworks:flux_plug`, `fluxnetworks:flux_point`, `minecraft:barrel`, `minecraft:chest`), `allthemodium:teleport_pad`, or `minecraft:bedrock`, pathfinding around them if encountered.
-     - **Energy Cube Charging & Fuel Stack Retention**: Charges the turtle from the Energy Cube in its inventory via `automata.chargeTurtle()`, and always keeps a stack (64) of any fuel item (coal, charcoal, etc.) in its storage (depositing only excess fuel and ores).
-     - **No-Coal Emergency Return**: If there is no coal in the turtle's inventory, it immediately stops and returns to Home.
-3. **Teleport Back to Base**:
-   - When the Turtle's 16-slot inventory is **full**, or when **no ores are left** in the passed list, the Turtle **teleports back to Home** via `automata.warpToPoint("home")` and aligns with Home (only digging its way back if there is not enough fuel to teleport).
-4. **Unload into Sophisticated Storage Barrel**:
-   - Back at the base, the Turtle places **all ores and excess items** into the **Sophisticated Storage Barrel** (`sophisticatedstorage:*barrel*`) to its side/front, **always keeping a full stack (64) of any fuel item** (coal, charcoal, etc.) and keeping any Energy Cube / tools / modem for fuel and operation.
-5. **Repeat**:
-   - The Turtle requests the next scan from the Base Computer and the cycle repeats automatically!
-
-### Controlling the Turtle Auto-Miner
-While the program is running on the Turtle screen, type a command and press **Enter** (or click the on-screen buttons on an Advanced Turtle):
-- `start` — Start mining nearby ores by tag.
-- `stop` — Pause/stop mining and stay idle until activated again.
-- `sethome [n|e|s|w]` — Save the turtle's current location as its Home in `/home.cfg`.
-- `return` (or `home`) — Stop mining and walk back to Home.
-- `shell` (or `quit`) — Exit to the CraftOS shell.
-
-You can also control it via CLI commands:
-```lua
-miner start           -- Start mining nearby ores
-miner stop            -- Stop and stay idle
-miner sethome n       -- Save current position (facing North) to /home.cfg
-miner status          -- Print current state, Home coordinates, and inventory ore count
+CLI Options:
+```bash
+install.lua --controller    # Install Base Controller
+install.lua --worker        # Install Mining Turtle
+install.lua --startup       # Automatically configure boot launch via startup.lua
 ```
 
 ---
 
-## Interactive Interface (TUI)
+## Base Setup & Pairing Workflow
 
-Launch the interactive interface by running:
-
-```lua
-minerhaven
--- or simply:
-mh
-```
-
-### Three Built-in Views
-
-1. **`1:Ores` (Grouped Summary)**:
-   - Groups scanned blocks by type, showing total count, distance to the nearest block, and a compass direction hint (`E/W`, `U/D`, `S/N`).
-   - Press **`Enter`** (or click a selected group) to lock onto that block type in the **Radar** tab.
-2. **`2:Radar` (Block Coordinates & Compass)**:
-   - Lists individual blocks sorted by nearest Manhattan distance with exact relative `(X, Y, Z)` coordinates and compass directions (`+X = East`, `-X = West`, `+Y = Up`, `-Y = Down`, `+Z = South`, `-Z = North`).
-3. **`3:Chunk` (Chunk Ore Analyzer)**:
-   - Calls `chunkAnalyze()` and displays all ores in the current chunk sorted by abundance with counts and percentages.
-
-### Controls (Keyboard & Mouse/Touch)
-
-| Key / Action | Description |
-| :--- | :--- |
-| **`S`** or **`Space`** (or click `[S:Scan]`) | Scan blocks (Tabs 1 & 2) or analyze current chunk (Tab 3). Automatically waits & retries if on cooldown. |
-| **`1`**, **`2`**, **`3`** or **`Tab`** (or click tab) | Switch between **Ores**, **Radar**, and **Chunk** views. |
-| **`Up` / `Down`** or **`W` / `J` / `K`** or **Scroll** | Navigate through the list. |
-| **`Enter`** | On Tab 1, filter and jump to Tab 2 (**Radar**) for the selected block type. |
-| **`-` / `+`** or **`[` / `]`** or **`Left` / `Right`** | Decrease / increase scan radius (`1`–`32`), showing live FE cost in the header. |
-| **`F`** (or click `[F:Ores]`) | Toggle between **Ores Only** and **All Blocks** instantly without re-scanning. |
-| **`/`** (or click `[/Find]`) | Filter by block name substring (e.g. `diamond`) or block tag (e.g. `#forge:ores`). |
-| **`C`** | Clear active search filter. |
-| **`Q`** (or click `[Q]uit`) | Exit to CraftOS shell. |
-
----
-
-## Command-Line Interface (CLI)
-
-You can also run quick one-off commands directly from the shell:
-
-```lua
-mh scan               -- Scan for ores within default radius (8)
-mh scan 12 diamond    -- Scan for diamond ores within radius 12
-mh all 6              -- Scan all blocks within radius 6
-mh chunk              -- Run chunkAnalyze() and print ore counts in current chunk
-mh chunk diamond      -- Check how many diamond ores are in the current chunk
-mh cost 16            -- Show FE scan cost for radius 16 and current/max fuel
-mh help               -- Show CLI usage
-```
-
----
-
-## Reusable Library API (`lib/geoscanner.lua`)
-
-`lib/geoscanner.lua` is a standalone module with zero UI dependencies so you can `require` it in your own turtle mining scripts, HUDs, or monitor dashboards.
-
-### Basic Usage
-
-```lua
-local GeoScanner = require("lib.geoscanner")
-
--- Automatically finds "geoScanner" (0.7) or "geo_scanner" (0.8 / 1.21.1+)
-local scanner, err = GeoScanner.find()
-if not scanner then
-    error(err)
-end
-
--- Check FE cost and fuel capacity
-print("Cost for r=8:", scanner:getCost(8))
-local fuel = scanner:getFuel()
-print("Max fuel:", fuel.max)
-
--- Scan for ores within radius 8 (with automatic cooldown retry!)
-local ores, scanErr = scanner:scanOres(8, {
-    retries = 4,
-    retryDelay = 0.6,
-})
-
-if ores then
-    for _, block in ipairs(ores) do
-        print(("%s at (%+d, %+d, %+d) dist=%d [%s]"):format(
-            block.prettyName, block.x, block.y, block.z, block.dist, block.direction
-        ))
-    end
-end
-```
-
-### Finding the Nearest Target (Great for Mining Turtles)
-
-```lua
-local GeoScanner = require("lib.geoscanner")
-local scanner = assert(GeoScanner.find())
-
--- Find the closest diamond ore within radius 8
-local target = scanner:findNearest(8, "diamond_ore", { retries = 3 })
-if target then
-    print("Nearest diamond:", target.x, target.y, target.z, target.direction)
-end
-```
-
-### Grouping Blocks & Analyzing Chunks
-
-```lua
-local GeoScanner = require("lib.geoscanner")
-local scanner = assert(GeoScanner.find())
-
--- Group scanned blocks by registry name with counts and nearest coordinates
-local blocks = assert(scanner:scanOres(8, { retries = 3 }))
-local groups = GeoScanner.groupByBlock(blocks)
-for _, group in ipairs(groups) do
-    print(group.prettyName, "x" .. group.count, "nearest dist:", group.nearest.dist)
-end
-
--- Analyze the current chunk (chunkAnalyze)
-local chunk = assert(scanner:analyzeChunk({ retries = 3 }))
-print("Total ores in chunk:", chunk.total)
-for _, entry in ipairs(chunk.entries) do
-    print(entry.prettyName, entry.count)
-end
-```
-
-### Enriched Block Fields
-
-Every block returned by `scanner:scan()`, `scanner:scanOres()`, or `scanner:findNearest()` includes:
-- `name` (`string`): Registry name (e.g. `"minecraft:deepslate_diamond_ore"`)
-- `shortName` (`string`): Name without namespace (e.g. `"deepslate_diamond_ore"`)
-- `prettyName` (`string`): Human-readable name (e.g. `"Deepslate Diamond Ore"`)
-- `x`, `y`, `z` (`number`): Relative coordinates from the Geo Scanner
-- `dist` (`number`): Manhattan distance (`|x| + |y| + |z|`)
-- `euclidean` (`number`): Euclidean 3D distance rounded to 1 decimal place
-- `direction` (`string`): Compact compass string (e.g. `"3E 2D 5S"`)
-- `isOre` (`boolean`): `true` if identified as an ore via block tags or registry name
-- `tags` (`table`): Sorted array of normalized tag strings
-- `tagMap` (`table`): Lookup table `{ [tag] = true }`
+1. **Base Setup**:
+   - Advanced Computer with an **Ender Modem** on top.
+   - **Geo Scanner** placed behind the computer.
+   - **Sophisticated Storage Barrel** adjacent to the turtle home spot.
+   - **End Automata Turtle** placed at Home facing North, equipped with an Ender Modem, Pickaxe, and End Automata.
+2. **Pairing**:
+   - Turn on the Worker Turtle: it displays a **6-digit pairing code** on its screen (e.g., `482 915`).
+   - On the Base Controller dashboard, click `[PAIR]` (or type `pair`).
+   - Enter the 6-digit code.
+   - Both devices complete the handshake, derive a 256-bit encryption key, and save the session.
+3. **Operation**:
+   - Click `[START]` or `[SCAN]` on the Controller dashboard.
+   - The Controller scans using its authoritative radius, encrypts the ore locations, and commands the turtle.
+   - The turtle mines the ores, teleports home when full, unloads into the barrel (keeping 64 fuel), and repeats!
