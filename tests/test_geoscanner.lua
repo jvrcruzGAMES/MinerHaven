@@ -1013,4 +1013,54 @@ assertEq(baseScanCycle, 2, "Base Computer performed second Geo Scanner scan for 
 assertEq(t4WarpCalls, 2, "Turtle teleported Home again at the end of the second cycle")
 assertTrue(turtle4Inv[1] ~= nil and turtle4Inv[1].name == "mekanism:ultimate_energy_cube", "Energy Cube still kept in Turtle's inventory")
 
+-- 11. Test Pickaxe Auto-Equip, Netherrack Breaking, and Java Exception Protection:
+--     11A: Inventory keeps pickaxe, modem, and energy items so they are never unloaded into the barrel or placed as waste
+assertTrue(turtleMiner4:shouldKeepInInventoryAtBase({ name = "computercraft:wireless_modem_advanced" }), "Ender Modem is kept in turtle inventory at base")
+assertTrue(turtleMiner4:shouldKeepInInventoryAtBase({ name = "minecraft:diamond_pickaxe" }), "Diamond Pickaxe is kept in turtle inventory at base")
+assertTrue(turtleMiner4:isFuelOrToolItem({ name = "computercraft:wireless_modem_advanced" }), "Ender Modem is recognized as tool/peripheral")
+assertTrue(turtleMiner4:isFuelOrToolItem({ name = "minecraft:diamond_pickaxe" }), "Pickaxe is recognized as tool/peripheral")
+
+--     11B: Turtle detects tool side vs automata side correctly
+assertEq(turtleMiner4:getAutomataSide(), "left", "Automata is on left side")
+assertEq(turtleMiner4:getToolSide(), "right", "Tool side is right side")
+
+--     11C: When digging a block (like netherrack) while a modem is on the tool side,
+--          the turtle automatically swaps its Pickaxe from inventory onto the tool side and digs natively via CC:Tweaked!
+local toolEquippedOnRight = "computercraft:wireless_modem_advanced"
+turtle4Inv[2] = { name = "minecraft:diamond_pickaxe", count = 1 }
+local mockWorldBlock = "minecraft:netherrack"
+local netherrackDugNatively = false
+
+_G.turtle.equipRight = function()
+    local prevEquipped = toolEquippedOnRight
+    local selSlot = _G.turtle.getSelectedSlot()
+    local itemInSlot = turtle4Inv[selSlot]
+    toolEquippedOnRight = itemInSlot and itemInSlot.name or nil
+    if prevEquipped then
+        turtle4Inv[selSlot] = { name = prevEquipped, count = 1 }
+    else
+        turtle4Inv[selSlot] = nil
+    end
+    return true
+end
+
+_G.turtle.dig = function()
+    if toolEquippedOnRight and toolEquippedOnRight:find("pickaxe", 1, true) then
+        netherrackDugNatively = true
+        mockWorldBlock = nil
+        return true
+    end
+    return false, "No tool to dig with"
+end
+
+_G.turtle.detect = function()
+    return mockWorldBlock ~= nil
+end
+
+local digSuccess, digErr = turtleMiner4:tryDigDirection("forward")
+assertTrue(digSuccess, "tryDigDirection succeeded in breaking netherrack")
+assertTrue(netherrackDugNatively, "Netherrack was broken natively via turtle.dig with auto-equipped pickaxe")
+assertEq(toolEquippedOnRight, "minecraft:diamond_pickaxe", "Pickaxe was auto-equipped onto the right side")
+assertEq(turtle4Inv[2].name, "computercraft:wireless_modem_advanced", "Ender Modem was placed into inventory slot")
+
 print(("ALL %d ASSERTIONS PASSED!"):format(passed))

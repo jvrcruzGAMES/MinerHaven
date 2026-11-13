@@ -283,6 +283,13 @@ function TurtleMiner:ensureModem()
         self.modem = m
         return m
     end
+    if self:tryEquipModem() then
+        m, err = GeoScanner.findModem()
+        if m then
+            self.modem = m
+            return m
+        end
+    end
     self.modem = nil
     return nil, err
 end
@@ -661,7 +668,7 @@ function TurtleMiner:isEnergyItem(detail)
 end
 
 --- Check if an item should be kept in the turtle's inventory when unloading into the Sophisticated Storage barrel at the base.
--- Keeps any Energy Cube / energy item for fuel (plus any unequipped pickaxe/tool if present).
+-- Keeps any Energy Cube / energy item for fuel (plus any unequipped pickaxe/tool/modem if present).
 function TurtleMiner:shouldKeepInInventoryAtBase(detail)
     if type(detail) ~= "table" or type(detail.name) ~= "string" then
         return false
@@ -674,6 +681,8 @@ function TurtleMiner:shouldKeepInInventoryAtBase(detail)
         or name:find("paxel", 1, true)
         or name:find("drill", 1, true)
         or name:find("automata", 1, true)
+        or name:find("modem", 1, true)
+        or name:find("scanner", 1, true)
     then
         return true
     end
@@ -690,6 +699,7 @@ function TurtleMiner:isFuelOrToolItem(detail)
     end
     local name = detail.name:lower()
     if name:find("scanner", 1, true)
+        or name:find("modem", 1, true)
         or name:find("_core", 1, true)
         or name:find("coal", 1, true)
         or name:find("charcoal", 1, true)
@@ -1212,54 +1222,93 @@ function TurtleMiner:selectToolSlot()
     return nil
 end
 
+--- Determine which side the End Automata is mounted on ("left" or "right").
+function TurtleMiner:getAutomataSide()
+    if peripheral and type(peripheral.getType) == "function" then
+        local leftType = peripheral.getType("left")
+        if leftType and leftType:lower():find("automata", 1, true) then
+            self.automataSide = "left"
+            return "left"
+        end
+        local rightType = peripheral.getType("right")
+        if rightType and rightType:lower():find("automata", 1, true) then
+            self.automataSide = "right"
+            return "right"
+        end
+    end
+    if self.automataSide == "left" or self.automataSide == "right" then
+        return self.automataSide
+    end
+    return "left"
+end
+
+--- Determine the non-Automata side used for mining tools or Ender Modem.
+function TurtleMiner:getToolSide()
+    local autoSide = self:getAutomataSide()
+    return (autoSide == "left") and "right" or "left"
+end
+
 --- If the turtle has a pickaxe in its inventory, equip it on the non-Automata side.
 function TurtleMiner:tryEquipPickaxe()
     if not turtle or not turtle.getItemDetail then
         return false
     end
-    local _, automataSide = self:ensureAutomata()
-    local scannerSide = self.scanner and self.scanner.name or ""
-    local prevSlot = turtle.getSelectedSlot and turtle.getSelectedSlot() or 1
+    local toolSide = self:getToolSide()
+    local equipFn = (toolSide == "left") and turtle.equipLeft or turtle.equipRight
+    if not equipFn then
+        return false
+    end
 
+    local prevSlot = turtle.getSelectedSlot and turtle.getSelectedSlot() or 1
     for slot = 1, 16 do
         local detail = turtle.getItemDetail(slot)
-        if detail and detail.name and detail.name:lower():find("pickaxe", 1, true) then
+        if detail and detail.name and (
+            detail.name:lower():find("pickaxe", 1, true)
+            or detail.name:lower():find("paxel", 1, true)
+            or detail.name:lower():find("drill", 1, true)
+        ) then
             if turtle.select then turtle.select(slot) end
-            if automataSide == "left" and turtle.equipRight then
-                if turtle.equipRight() then
-                    self.scanner = nil
-                    if turtle.select then turtle.select(prevSlot) end
-                    return true
-                end
-            elseif automataSide == "right" and turtle.equipLeft then
-                if turtle.equipLeft() then
-                    self.scanner = nil
-                    if turtle.select then turtle.select(prevSlot) end
-                    return true
-                end
-            elseif scannerSide == "left" and turtle.equipRight then
-                if turtle.equipRight() then
-                    if turtle.select then turtle.select(prevSlot) end
-                    return true
-                end
-            elseif scannerSide == "right" and turtle.equipLeft then
-                if turtle.equipLeft() then
-                    if turtle.select then turtle.select(prevSlot) end
-                    return true
-                end
-            elseif turtle.equipLeft then
-                if turtle.equipLeft() then
-                    local swapped = turtle.getItemDetail(slot)
-                    if swapped and swapped.name and (
-                        swapped.name:lower():find("geo_scanner", 1, true)
-                        or swapped.name:lower():find("automata", 1, true)
-                    ) then
-                        turtle.equipLeft()
-                        if turtle.equipRight then turtle.equipRight() end
-                    end
-                    if turtle.select then turtle.select(prevSlot) end
-                    return true
-                end
+            if equipFn() then
+                self.modem = nil
+                self.scanner = nil
+                if turtle.select then turtle.select(prevSlot) end
+                return true
+            end
+        end
+    end
+    if turtle.select then
+        turtle.select(prevSlot)
+    end
+    return false
+end
+
+--- If the turtle has an Ender Modem in its inventory, equip it on the non-Automata side.
+function TurtleMiner:tryEquipModem()
+    if not turtle or not turtle.getItemDetail then
+        return false
+    end
+    local toolSide = self:getToolSide()
+    local equipFn = (toolSide == "left") and turtle.equipLeft or turtle.equipRight
+    if not equipFn then
+        return false
+    end
+
+    if peripheral and type(peripheral.getType) == "function" then
+        local curType = peripheral.getType(toolSide)
+        if curType and curType:lower():find("modem", 1, true) then
+            return true
+        end
+    end
+
+    local prevSlot = turtle.getSelectedSlot and turtle.getSelectedSlot() or 1
+    for slot = 1, 16 do
+        local detail = turtle.getItemDetail(slot)
+        if detail and detail.name and detail.name:lower():find("modem", 1, true) then
+            if turtle.select then turtle.select(slot) end
+            if equipFn() then
+                self.modem = nil
+                if turtle.select then turtle.select(prevSlot) end
+                return true
             end
         end
     end
@@ -1316,6 +1365,13 @@ function TurtleMiner:digWithAutomata(dirName)
             sleepSeconds(0.1)
         else
             lastErr = tostring(err or res or "digBlock failed")
+            if lastErr:find("Java exception", 1, true) or lastErr:find("NullPointerException", 1, true) then
+                -- Known AP 0.8.2a bug in APFakePlayer.awardStat when holding a damageable tool; abort immediately
+                if turtle and turtle.select then
+                    turtle.select(prevSlot)
+                end
+                return false, "java_exception"
+            end
             if lastErr:lower():find("cooldown", 1, true) then
                 sleepSeconds(0.5)
             else
@@ -1330,7 +1386,8 @@ function TurtleMiner:digWithAutomata(dirName)
     return dugSuccess, lastErr
 end
 
---- Break a block in `dirName` (`"forward"`, `"up"`, `"down"`) using `turtle.dig*` or `automata.digBlock`.
+--- Break a block in `dirName` (`"forward"`, `"up"`, `"down"`) using native `turtle.dig*` or `automata.digBlock`.
+-- Always prioritizes native CC:Tweaked turtle.dig (auto-equipping a Pickaxe on the tool side if needed).
 function TurtleMiner:tryDigDirection(dirName, isTargetOre)
     local digFn = turtle and turtle.dig or nil
     local detectFn = turtle and turtle.detect or nil
@@ -1345,22 +1402,25 @@ function TurtleMiner:tryDigDirection(dirName, isTargetOre)
     local before = isTargetOre and self:snapshotInventoryCounts() or nil
     local ok, err = false, "no_dig_fn"
 
+    -- 1. Try native CC:Tweaked dig first
     if type(digFn) == "function" then
         ok, err = digFn()
     end
 
+    -- 2. If native dig failed (e.g. modem is equipped or no tool on toolSide), auto-equip pickaxe and retry native dig!
+    if not ok and type(digFn) == "function" then
+        if self:tryEquipPickaxe() then
+            ok, err = digFn()
+        end
+    end
+
+    -- 3. Only fall back to automata dig if native dig is completely unavailable or pickaxe is missing
     if not ok then
         local autoOk, autoErr = self:digWithAutomata(dirName)
         if autoOk then
             ok, err = true, nil
         elseif autoErr and autoErr ~= "no_automata_dig" then
             err = autoErr
-        end
-    end
-
-    if not ok and type(digFn) == "function" then
-        if self:tryEquipPickaxe() then
-            ok, err = digFn()
         end
     end
 
@@ -2265,6 +2325,7 @@ function TurtleMiner:stepWorker()
         end
 
         -- Mine the next ore location passed by the Base Computer
+        self:tryEquipPickaxe()
         local mined = false
         local minedTarget = nil
         while #self.oreQueue > 0 do
