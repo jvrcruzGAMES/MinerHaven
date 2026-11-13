@@ -178,9 +178,16 @@ function Controller:broadcastCommand(action)
         running = self.config.running,
     }
     local count = 0
-    for wId, _ in pairs(self.workers) do
-        local ok = self.net:send(wId, payload)
-        if ok then count = count + 1 end
+    local bursts = (action == "stop" or action == "start" or action == "return_home") and 3 or 1
+    for b = 1, bursts do
+        for wId, _ in pairs(self.workers) do
+            local targetNum = tonumber(wId) or wId
+            local ok = self.net:send(targetNum, payload)
+            if ok and b == 1 then count = count + 1 end
+        end
+        if bursts > 1 and b < bursts and os.sleep then
+            os.sleep(0.05)
+        end
     end
     self.lastLog = string.format("Command '%s' sent to %d worker(s)", action, count)
     return count

@@ -595,32 +595,56 @@ function Worker:moveUp()
     return false
 end
 
-function Worker:refuelIfNeeded()
+function Worker:refuelTo(targetFuel)
     if not turtle or not turtle.getFuelLevel then return end
     if turtle.getFuelLevel() == "unlimited" then return end
-    if turtle.getFuelLevel() < 300 then
-        -- Refuel using coal if excess > 64 or emergency
+    targetFuel = targetFuel or 500
+
+    while turtle.getFuelLevel() < targetFuel do
+        local refueledAny = false
         for slot = 1, 16 do
             local detail = turtle.getItemDetail(slot)
             if detail and self:isCoalItem(detail) then
                 turtle.select(slot)
-                turtle.refuel(1)
-                turtle.select(1)
-                if turtle.getFuelLevel() >= 300 then break end
+                local curFuel = turtle.getFuelLevel()
+                local needed = math.ceil((targetFuel - curFuel) / 80)
+                local toConsume = math.max(1, math.min(needed, detail.count or 1))
+                if turtle.refuel(toConsume) then
+                    refueledAny = true
+                    if turtle.getFuelLevel() >= targetFuel then break end
+                end
             end
         end
+        if not refueledAny then break end
+    end
+    turtle.select(1)
+end
+
+function Worker:refuelIfNeeded()
+    if not turtle or not turtle.getFuelLevel then return end
+    if turtle.getFuelLevel() == "unlimited" then return end
+    if turtle.getFuelLevel() < 300 then
+        self:refuelTo(500)
     end
 end
 
---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
 -- End Automata Home Teleport & Fallback Pathfinding
---------------------------------------------------------------------------------
+---------------------------------------------------------------------------------
 
 function Worker:saveHomeWarpPoint()
     local automata = self:ensureAutomata()
     if automata and automata.savePoint then
-        pcall(automata.savePoint, HOME_WARP_NAME)
+        if automata.deletePoint then
+            pcall(automata.deletePoint, HOME_WARP_NAME)
+        end
+        local ok, res, err = pcall(automata.savePoint, HOME_WARP_NAME)
+        if ok and res == true then
+            return true
+        end
+        return false, err or res
     end
+    return false, "no_automata"
 end
 
 function Worker:teleportHome()
@@ -629,7 +653,30 @@ function Worker:teleportHome()
         return false, "no_automata"
     end
 
-    local ok, res = pcall(automata.warpToPoint, HOME_WARP_NAME)
+    -- 1. Ensure sufficient fuel for warping
+    self:refuelIfNeeded()
+    if automata.estimateWarpCost then
+        local costOk, cost = pcall(automata.estimateWarpCost, HOME_WARP_NAME)
+        if costOk and type(cost) == "number" then
+            local curFuel = turtle and turtle.getFuelLevel and turtle.getFuelLevel() or 0
+            if curFuel < cost then
+                self:refuelTo(cost + 50)
+            end
+        end
+    end
+
+    -- 2. Check warp cooldown
+    if automata.getWarpCooldown then
+        local cdOk, cd = pcall(automata.getWarpCooldown)
+        if cdOk and type(cd) == "number" and cd > 0 then
+            self.lastAction = string.format("Warp cooldown (%.1fs). Waiting...", cd)
+            self:renderHeadlessUI()
+            if os.sleep then os.sleep(cd + 0.1) end
+        end
+    end
+
+    -- 3. Execute warp
+    local ok, res, resMsg = pcall(automata.warpToPoint, HOME_WARP_NAME)
     if ok and res == true then
         self.pos.x = self.home.x
         self.pos.y = self.home.y
@@ -638,7 +685,9 @@ function Worker:teleportHome()
         self:turnTo(self.home.dir or 0)
         return true
     end
-    return false, tostring(res)
+
+    local errMsg = (ok and res == nil and resMsg) or (not ok and res) or res or "unknown_warp_error"
+    return false, tostring(errMsg)
 end
 
 function Worker:returnToHome()
@@ -650,12 +699,15 @@ function Worker:returnToHome()
     local warped, err = self:teleportHome()
     if warped then
         self.lastAction = "Warped home via End Automata!"
+        self:renderHeadlessUI()
+        self:sendTelemetry()
         return true
     end
 
-    -- Fallback: dig way back home
-    self.lastAction = "Automata warp failed (" .. tostring(err) .. "). Digging back home..."
+    -- Fallback: dig way back home if automata warp failed
+    self.lastAction = string.format("Automata warp failed (%s). Digging back home...", tostring(err))
     self:renderHeadlessUI()
+    self:sendTelemetry()
 
     -- 1. Y movement (up to home.y)
     while self.pos.y < self.home.y do
@@ -797,13 +849,26 @@ function Worker:handleCommand(payload)
         self.lastAction = "Started by Controller."
     elseif action == "stop" then
         self.running = false
+        self.oreQueue = {}
         self.phase = "STOPPED"
-        self.lastAction = "Stopped by Controller. Returning home..."
+        self.lastAction = "Stopped by Controller. Teleporting home..."
+        self:renderHeadlessUI()
+        self:sendTelemetry()
         self:returnToHome()
         self:unloadToBarrel()
+        self.phase = "IDLE (Remote)"
+        self.lastAction = "Stopped at Base by Controller."
     elseif action == "return_home" then
+        self.running = false
+        self.oreQueue = {}
+        self.phase = "RETURNING HOME"
+        self.lastAction = "Returning home by Controller command..."
+        self:renderHeadlessUI()
+        self:sendTelemetry()
         self:returnToHome()
         self:unloadToBarrel()
+        self.phase = "IDLE (Remote)"
+        self.lastAction = "Returned Home by Controller."
     elseif action == "sethome" then
         self.home = {
             x = self.pos.x,
@@ -817,6 +882,7 @@ function Worker:handleCommand(payload)
             self.home.x, self.home.y, self.home.z, DIR_NAMES[self.home.dir or 0] or "N")
     elseif action == "unpair" then
         self.running = false
+        self.oreQueue = {}
         self.phase = "UNPAIRED"
         self.lastAction = "Unpaired by Controller."
         Device.unpair()
@@ -842,6 +908,23 @@ function Worker:mineToTarget(target)
 
     while steps < maxSteps do
         steps = steps + 1
+
+        -- Responsive remote control: check network at every movement step
+        local msg, fromId = self.net:pullMessage(0.05)
+        if msg and self:isSenderController(fromId) then
+            if msg.type == "command" then
+                self:handleCommand(msg)
+                if not self.running then
+                    return false, "stopped"
+                end
+            elseif msg.type == "ore_locations" then
+                self:handleOreBatch(msg)
+            end
+        end
+
+        if not self.running then
+            return false, "stopped"
+        end
 
         local dx = target.x - self.pos.x
         local dy = target.y - self.pos.y
@@ -922,9 +1005,14 @@ end
 
 function Worker:run()
     self.net:open()
-    self:saveHomeWarpPoint()
-    self:saveHome()
-    self:savePos()
+
+    -- Only record home warp point when truly at base or on initial boot
+    local atHome = (self.pos.x == self.home.x and self.pos.y == self.home.y and self.pos.z == self.home.z)
+    if atHome then
+        self:saveHomeWarpPoint()
+        self:saveHome()
+        self:savePos()
+    end
 
     self:renderHeadlessUI()
     self:sendTelemetry()
@@ -989,7 +1077,9 @@ function Worker:run()
                 local target = table.remove(self.oreQueue, 1)
                 self.phase = "MINING"
                 local ok, err = self:mineToTarget(target)
-                if err == "no_coal" then
+                if err == "stopped" then
+                    -- Worker was stopped by controller and already teleported home
+                elseif err == "no_coal" then
                     self.phase = "EMERGENCY: NO COAL"
                     self:returnToHome()
                     self:unloadToBarrel()

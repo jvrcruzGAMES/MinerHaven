@@ -1496,4 +1496,91 @@ assertEq(mockDashboardCtrl.setWorkerHomeCalled, 7, "Dashboard handleCommand 'set
 testDash:handleCommand("unpair 7")
 assertEq(mockDashboardCtrl.unpairWorkerCalled, 7, "Dashboard handleCommand 'unpair 7' invoked controller:unpairWorker")
 
+-- 13.8 Stop Command, Queue Clearing, Warp Teleport & Interruption Tests
+-- Test Worker refuelTo helper
+local mockFuel = 50
+local mockInv = {
+    [1] = { name = "minecraft:coal", count = 10 }
+}
+_G.turtle.getFuelLevel = function() return mockFuel end
+_G.turtle.getItemDetail = function(slot) return mockInv[slot] end
+_G.turtle.refuel = function(count)
+    local avail = mockInv[1].count
+    local take = math.min(count, avail)
+    mockInv[1].count = mockInv[1].count - take
+    mockFuel = mockFuel + (take * 80)
+    return true
+end
+testWorker:refuelTo(300)
+assertTrue(mockFuel >= 300, "refuelTo reached required target fuel")
+assertTrue(mockInv[1].count < 10, "Coal consumed to meet fuel requirement")
+
+-- Test Worker:teleportHome with estimateWarpCost
+local warpedCalledWith = nil
+local deletedPointCalledWith = nil
+local savedPointCalledWith = nil
+local mockAutomataWithWarp = {
+    estimateWarpCost = function(pt) return 250 end,
+    getWarpCooldown = function() return 0 end,
+    warpToPoint = function(pt)
+        warpedCalledWith = pt
+        return true
+    end,
+    deletePoint = function(pt)
+        deletedPointCalledWith = pt
+        return true
+    end,
+    savePoint = function(pt)
+        savedPointCalledWith = pt
+        return true
+    end,
+}
+testWorker.ensureAutomata = function() return mockAutomataWithWarp, "left" end
+testWorker.home = { x = 0, y = 0, z = 0, dir = 0 }
+testWorker.pos = { x = 10, y = -20, z = 30, dir = 1 }
+local tpSuccess, tpErr = testWorker:teleportHome()
+assertTrue(tpSuccess, "Worker:teleportHome succeeded via End Automata")
+assertEq(warpedCalledWith, "home", "Warped specifically to 'home'")
+assertEq(testWorker.pos.x, 0, "Worker pos x restored to home after teleport")
+assertEq(testWorker.pos.y, 0, "Worker pos y restored to home after teleport")
+assertEq(testWorker.pos.z, 0, "Worker pos z restored to home after teleport")
+
+-- Test saveHomeWarpPoint deletes before saving
+local saveWpOk = testWorker:saveHomeWarpPoint()
+assertTrue(saveWpOk, "Worker:saveHomeWarpPoint succeeded")
+assertEq(deletedPointCalledWith, "home", "saveHomeWarpPoint deleted existing point first")
+assertEq(savedPointCalledWith, "home", "saveHomeWarpPoint saved 'home' point")
+
+-- Test handleCommand('stop') clears ore queue and teleports home
+testWorker.running = true
+testWorker.oreQueue = {
+    { x = 5, y = -10, z = 5, name = "minecraft:diamond_ore" },
+    { x = 8, y = -12, z = 8, name = "minecraft:iron_ore" },
+}
+testWorker.pos = { x = 5, y = -10, z = 5, dir = 0 }
+testWorker:handleCommand({ action = "stop" })
+assertEq(testWorker.running, false, "Worker stopped after 'stop' command")
+assertEq(#testWorker.oreQueue, 0, "Ore queue completely cleared upon receiving 'stop'")
+assertEq(testWorker.phase, "IDLE (Remote)", "Worker phase set to IDLE (Remote) after stopping at base")
+assertEq(testWorker.pos.x, 0, "Worker pos at home (0,0,0) after stop")
+
+-- Test mineToTarget stops immediately when stop message arrives during mining steps
+testWorker.controllerId = 1
+testWorker.running = true
+testWorker.oreQueue = { { x = 20, y = -20, z = 20, name = "minecraft:ancient_debris" } }
+testWorker.pos = { x = 1, y = 0, z = 0, dir = 1 }
+local stopDelivered = false
+testWorker.net.pullMessage = function(self, timeout)
+    if not stopDelivered then
+        stopDelivered = true
+        return { type = "command", action = "stop" }, 1, self.channel
+    end
+    return nil
+end
+local mineOk, mineErr = testWorker:mineToTarget({ x = 20, y = -20, z = 20, name = "minecraft:ancient_debris" })
+assertEq(mineOk, false, "mineToTarget returned false when stopped")
+assertEq(mineErr, "stopped", "mineToTarget returned error 'stopped'")
+assertEq(testWorker.running, false, "Worker stopped flag set")
+assertEq(#testWorker.oreQueue, 0, "Ore queue cleared on stop during mineToTarget")
+
 print(("ALL %d ASSERTIONS PASSED!"):format(passed))
