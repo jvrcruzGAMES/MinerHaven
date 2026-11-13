@@ -584,11 +584,16 @@ TurtleMiner.setHomeHere = TurtleMiner.sethome
 function TurtleMiner:start()
     self.running = true
     self.pendingReturnOnStop = false
-    self.phase = "MINING"
+    if not self:hasCoal() then
+        self.phase = "WAITING FOR COAL"
+        self.lastAction = "Started, but no coal in inventory! Add coal to turtle at Home..."
+    else
+        self.phase = "MINING"
+        self.lastAction = "Started! Ready to mine..."
+    end
     if self:isAtHome() then
         self:saveHomeWarpPoint()
     end
-    self.lastAction = "Started! Ready to mine..."
     self:saveState()
     self:sendStatusToBase()
 end
@@ -667,8 +672,88 @@ function TurtleMiner:isEnergyItem(detail)
     return self.energyItems[name] == true or GeoScanner.isEnergyItemName(name)
 end
 
+--- Check whether an item is coal or charcoal.
+function TurtleMiner:isCoalItem(detail)
+    if type(detail) ~= "table" or type(detail.name) ~= "string" then
+        return false
+    end
+    local name = detail.name:lower()
+    if name:find("coal", 1, true) or name:find("charcoal", 1, true) then
+        return true
+    end
+    if detail.tags then
+        for _, tag in ipairs(detail.tags) do
+            local t = tostring(tag):lower()
+            if t:find("coal", 1, true) or t:find("charcoal", 1, true) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+--- Count the total amount of coal/charcoal in the turtle's inventory.
+function TurtleMiner:getCoalCount()
+    if not turtle then
+        return 0
+    end
+    local total = 0
+    for slot = 1, 16 do
+        local count = (turtle.getItemCount and turtle.getItemCount(slot)) or 0
+        if count > 0 then
+            local detail = turtle.getItemDetail and turtle.getItemDetail(slot, true) or nil
+            if detail and self:isCoalItem(detail) then
+                total = total + (detail.count or count)
+            end
+        end
+    end
+    return total
+end
+
+--- Check whether the turtle has coal in its inventory.
+function TurtleMiner:hasCoal()
+    return self:getCoalCount() > 0
+end
+
+--- Check whether an item is any fuel item (coal, charcoal, blaze rod, lava bucket, or any refuelable item).
+function TurtleMiner:isFuelItem(detail, slot)
+    if type(detail) ~= "table" or type(detail.name) ~= "string" then
+        return false
+    end
+    if self:isCoalItem(detail) then
+        return true
+    end
+    local name = detail.name:lower()
+    if name:find("blaze_rod", 1, true)
+        or name == "minecraft:lava_bucket"
+        or name:find("fuel", 1, true)
+        or name:find("bio_fuel", 1, true)
+    then
+        return true
+    end
+    if detail.tags then
+        for _, tag in ipairs(detail.tags) do
+            local t = tostring(tag):lower()
+            if t:find("fuel", 1, true) or t:find("coal", 1, true) then
+                return true
+            end
+        end
+    end
+    if slot and turtle and type(turtle.refuel) == "function" and type(turtle.select) == "function" then
+        local prev = turtle.getSelectedSlot and turtle.getSelectedSlot() or 1
+        turtle.select(slot)
+        local ok, isFuel = pcall(turtle.refuel, 0)
+        turtle.select(prev)
+        if ok and isFuel == true then
+            return true
+        end
+    end
+    return false
+end
+
 --- Check if an item should be kept in the turtle's inventory when unloading into the Sophisticated Storage barrel at the base.
 -- Keeps any Energy Cube / energy item for fuel (plus any unequipped pickaxe/tool/modem if present).
+-- Note: Fuel items (coal, charcoal, etc.) are handled in unloadToBarrel() which always keeps a stack (64) in storage.
 function TurtleMiner:shouldKeepInInventoryAtBase(detail)
     if type(detail) ~= "table" or type(detail.name) ~= "string" then
         return false
@@ -690,11 +775,14 @@ function TurtleMiner:shouldKeepInInventoryAtBase(detail)
 end
 
 --- Check if an item is an energy battery/cell, fuel, or tool/peripheral so it is never placed as waste in tunnels.
-function TurtleMiner:isFuelOrToolItem(detail)
+function TurtleMiner:isFuelOrToolItem(detail, slot)
     if type(detail) ~= "table" or type(detail.name) ~= "string" then
         return false
     end
     if self:shouldKeepInInventoryAtBase(detail) then
+        return true
+    end
+    if self:isFuelItem(detail, slot) then
         return true
     end
     local name = detail.name:lower()
@@ -713,14 +801,28 @@ function TurtleMiner:isFuelOrToolItem(detail)
 end
 
 --- Check whether the turtle has any items in its inventory that should be unloaded into the Sophisticated Storage barrel.
+-- Respects keeping up to a full stack (64) of any fuel item in storage.
 function TurtleMiner:hasItemsToUnload()
     if not turtle or not turtle.getItemCount then
         return false
     end
+    local keptFuelCounts = {}
     for slot = 1, 16 do
-        if turtle.getItemCount(slot) > 0 then
+        local count = turtle.getItemCount(slot) or 0
+        if count > 0 then
             local detail = turtle.getItemDetail and turtle.getItemDetail(slot, true) or nil
-            if not detail or not self:shouldKeepInInventoryAtBase(detail) then
+            if self:shouldKeepInInventoryAtBase(detail) then
+                -- Always kept (Energy Cube, tool, modem)
+            elseif detail and self:isFuelItem(detail, slot) then
+                local fuelKey = detail.name:lower()
+                local alreadyKept = keptFuelCounts[fuelKey] or 0
+                local needed = math.max(0, 64 - alreadyKept)
+                if count > needed then
+                    return true
+                else
+                    keptFuelCounts[fuelKey] = alreadyKept + count
+                end
+            else
                 return true
             end
         end
@@ -729,7 +831,8 @@ function TurtleMiner:hasItemsToUnload()
 end
 
 --- Unload everything in the turtle's inventory into the Sophisticated Storage barrel at the base,
--- with the exception of any Energy Cube (or energy item / tool), which stays in the turtle for fuel.
+-- with the exception of any Energy Cube (or energy item / tool / modem), and always keeping a stack (64)
+-- of any fuel item (coal, charcoal, etc.) in the turtle's storage.
 function TurtleMiner:unloadToBarrel()
     if not turtle or not turtle.getItemCount then
         return 0
@@ -793,11 +896,35 @@ function TurtleMiner:unloadToBarrel()
 
     local unloadedSlots = 0
     local prevSlot = turtle.getSelectedSlot and turtle.getSelectedSlot() or 1
+    local keptFuelCounts = {}
+
     for slot = 1, 16 do
-        local count = turtle.getItemCount(slot)
+        local count = turtle.getItemCount(slot) or 0
         if count > 0 then
             local detail = turtle.getItemDetail and turtle.getItemDetail(slot, true) or nil
-            if not detail or not self:shouldKeepInInventoryAtBase(detail) then
+            if self:shouldKeepInInventoryAtBase(detail) then
+                -- Always kept (Energy Cube, tool, modem)
+            elseif detail and self:isFuelItem(detail, slot) then
+                local fuelKey = detail.name:lower()
+                local alreadyKept = keptFuelCounts[fuelKey] or 0
+                local needed = math.max(0, 64 - alreadyKept)
+                if count <= needed then
+                    keptFuelCounts[fuelKey] = alreadyKept + count
+                    -- Keep all items in this slot (part of the 64 fuel stack)
+                else
+                    keptFuelCounts[fuelKey] = alreadyKept + needed
+                    local toDrop = count - needed
+                    if toDrop > 0 then
+                        if turtle.select then
+                            turtle.select(slot)
+                        end
+                        if dropFn(toDrop) then
+                            unloadedSlots = unloadedSlots + 1
+                        end
+                    end
+                end
+            else
+                -- Non-fuel item (ore, stone, etc.): drop entire slot
                 if turtle.select then
                     turtle.select(slot)
                 end
@@ -1034,12 +1161,23 @@ function TurtleMiner:getInventoryStats()
     if not turtle or not turtle.getItemCount then
         return 0, 0
     end
+    local keptFuelCounts = {}
     for slot = 1, 16 do
-        local count = turtle.getItemCount(slot)
+        local count = turtle.getItemCount(slot) or 0
         if count > 0 then
             usedSlots = usedSlots + 1
             local detail = turtle.getItemDetail and turtle.getItemDetail(slot, true) or nil
-            if detail and GeoScanner.isOreItem(detail, self.minedItems) and not self:isFuelOrToolItem(detail) then
+            if detail and self:isFuelItem(detail, slot) then
+                local fuelKey = detail.name:lower()
+                local alreadyKept = keptFuelCounts[fuelKey] or 0
+                local needed = math.max(0, 64 - alreadyKept)
+                if count > needed then
+                    oreCount = oreCount + (count - needed)
+                    keptFuelCounts[fuelKey] = 64
+                else
+                    keptFuelCounts[fuelKey] = alreadyKept + count
+                end
+            elseif detail and GeoScanner.isOreItem(detail, self.minedItems) and not self:isFuelOrToolItem(detail, slot) then
                 oreCount = oreCount + (detail.count or count)
             end
         end
@@ -1047,15 +1185,26 @@ function TurtleMiner:getInventoryStats()
     return usedSlots, oreCount
 end
 
---- Check whether the turtle's inventory currently contains any ores (by tag or mined ore item).
+--- Check whether the turtle's inventory currently contains any ores (by tag or mined ore item) that need unloading.
 function TurtleMiner:hasOresInInventory()
     if not turtle or not turtle.getItemCount then
         return false
     end
+    local keptFuelCounts = {}
     for slot = 1, 16 do
-        if turtle.getItemCount(slot) > 0 then
+        local count = turtle.getItemCount(slot) or 0
+        if count > 0 then
             local detail = turtle.getItemDetail and turtle.getItemDetail(slot, true) or nil
-            if detail and GeoScanner.isOreItem(detail, self.minedItems) and not self:isFuelOrToolItem(detail) then
+            if detail and self:isFuelItem(detail, slot) then
+                local fuelKey = detail.name:lower()
+                local alreadyKept = keptFuelCounts[fuelKey] or 0
+                local needed = math.max(0, 64 - alreadyKept)
+                if count > needed then
+                    return true
+                else
+                    keptFuelCounts[fuelKey] = alreadyKept + count
+                end
+            elseif detail and GeoScanner.isOreItem(detail, self.minedItems) and not self:isFuelOrToolItem(detail, slot) then
                 return true
             end
         end
@@ -1865,6 +2014,10 @@ function TurtleMiner:moveTo(tx, ty, tz, stopAdjacent, respectStop)
         if respectStop and not self.running then
             return false
         end
+        if respectStop and not self:hasCoal() then
+            self.lastMoveError = "No coal in inventory!"
+            return false
+        end
 
         local dx = tx - self.pos.x
         local dy = ty - self.pos.y
@@ -2007,6 +2160,10 @@ function TurtleMiner:moveTo(tx, ty, tz, stopAdjacent, respectStop)
             local stepOk = false
             for _, node in ipairs(path) do
                 if respectStop and not self.running then
+                    return false
+                end
+                if respectStop and not self:hasCoal() then
+                    self.lastMoveError = "No coal in inventory!"
                     return false
                 end
                 local nOk, nReason = self:stepToNeighbor(node.x, node.y, node.z)
@@ -2241,7 +2398,37 @@ function TurtleMiner:stepWorker()
         self:saveHomeWarpPoint()
     end
 
-    -- 1. If we are waiting at Home for ores to be unloaded, try unloading to the Barrel first
+    -- 1. If we are waiting for coal, stay idle at Home until coal is placed into inventory
+    if self.phase == "WAITING FOR COAL" then
+        if not self:hasCoal() then
+            self.lastAction = "Waiting at Home: No coal in inventory. Please add coal..."
+            self.inWorkerStep = false
+            return "no_coal"
+        else
+            self.phase = "MINING"
+            self.lastAction = "Coal detected in inventory! Resuming mining..."
+        end
+    end
+
+    -- 2. If turtle has NO coal in inventory, immediately return to Home and wait for coal!
+    if not self:hasCoal() then
+        if not self:isAtHome() then
+            local res = self:returnAndUnloadAtBase("No coal in inventory! Returning to Home immediately...")
+            self.phase = "WAITING FOR COAL"
+            self.lastAction = "No coal in inventory! Add coal to turtle at Home..."
+            self.inWorkerStep = false
+            return res
+        else
+            self:unloadToBarrel()
+            self.phase = "WAITING FOR COAL"
+            self.lastAction = "No coal in inventory! Add coal to turtle at Home..."
+            self.inWorkerStep = false
+            self:sendStatusToBase()
+            return "no_coal"
+        end
+    end
+
+    -- 3. If we are waiting at Home for ores to be unloaded, try unloading to the Barrel first
     if self.phase == "WAITING AT HOME" then
         self:unloadToBarrel()
         if self:hasOresInInventory() then
@@ -2258,7 +2445,7 @@ function TurtleMiner:stepWorker()
         end
     end
 
-    -- 2. Place any waste blocks if inventory is full, then return Home & unload to Barrel if full
+    -- 4. Place any waste blocks if inventory is full, then return Home & unload to Barrel if full
     self:clearWasteIfFull()
     if self:isInventoryFull() then
         local res = self:returnAndUnloadAtBase("Inventory full!")
@@ -2329,6 +2516,13 @@ function TurtleMiner:stepWorker()
         local mined = false
         local minedTarget = nil
         while #self.oreQueue > 0 do
+            if not self:hasCoal() then
+                local res = self:returnAndUnloadAtBase("No coal in inventory! Returning to Home immediately...")
+                self.phase = "WAITING FOR COAL"
+                self.lastAction = "No coal in inventory! Add coal to turtle at Home..."
+                self.inWorkerStep = false
+                return "no_coal"
+            end
             local target = table.remove(self.oreQueue, 1)
             self.chunkOresRemaining = #self.oreQueue
             local refX = (target.fromHome ~= false) and self.home.x or self.pos.x
@@ -2347,6 +2541,13 @@ function TurtleMiner:stepWorker()
             if not self.running then
                 self.inWorkerStep = false
                 return self:finishStopReturnHome()
+            end
+            if not self:hasCoal() then
+                local res = self:returnAndUnloadAtBase("No coal in inventory! Returning to Home immediately...")
+                self.phase = "WAITING FOR COAL"
+                self.lastAction = "No coal in inventory! Add coal to turtle at Home..."
+                self.inWorkerStep = false
+                return "no_coal"
             end
             if mined then
                 minedTarget = target
@@ -2475,6 +2676,13 @@ function TurtleMiner:stepWorker()
     local minedTarget = nil
 
     for _, target in ipairs(ores) do
+        if not self:hasCoal() then
+            local res = self:returnAndUnloadAtBase("No coal in inventory! Returning to Home immediately...")
+            self.phase = "WAITING FOR COAL"
+            self.lastAction = "No coal in inventory! Add coal to turtle at Home..."
+            self.inWorkerStep = false
+            return "no_coal"
+        end
         local targetX = self.pos.x + target.x
         local targetY = self.pos.y + target.y
         local targetZ = self.pos.z + target.z
@@ -2487,6 +2695,13 @@ function TurtleMiner:stepWorker()
         if not self.running then
             self.inWorkerStep = false
             return self:finishStopReturnHome()
+        end
+        if not self:hasCoal() then
+            local res = self:returnAndUnloadAtBase("No coal in inventory! Returning to Home immediately...")
+            self.phase = "WAITING FOR COAL"
+            self.lastAction = "No coal in inventory! Add coal to turtle at Home..."
+            self.inWorkerStep = false
+            return "no_coal"
         end
         if mined then
             minedTarget = target

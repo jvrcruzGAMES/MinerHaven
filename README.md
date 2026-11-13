@@ -50,11 +50,12 @@ When you run `install.lua`, it asks **which computer this installation is for** 
      - **Down-first movement priority**: Moves **down (`-Y`)** first before moving horizontally (`X/Z`).
      - **Places Waste Blocks in Path**: Places non-ore waste blocks (`cobblestone`, `dirt`, `cobbled_deepslate`, `stone`, etc.) in its path instead of dropping them.
      - **Forbidden Base Blocks & Teleport Pad Protection**: Never breaks any Base blocks (`computercraft:*`, `advancedperipherals:*`, `sophisticatedstorage:*`, `mekanism:*_energy_cube`, `fluxnetworks:flux_plug`, `fluxnetworks:flux_point`, `minecraft:barrel`, `minecraft:chest`), `allthemodium:teleport_pad`, or `minecraft:bedrock`, pathfinding around them if encountered.
-     - **Energy Cube Charging**: Charges the turtle from the Energy Cube in its inventory via `automata.chargeTurtle()`.
+     - **Energy Cube Charging & Fuel Stack Retention**: Charges the turtle from the Energy Cube in its inventory via `automata.chargeTurtle()`, and always keeps a stack (64) of any fuel item (coal, charcoal, etc.) in its storage (depositing only excess fuel and ores).
+     - **No-Coal Emergency Return**: If there is no coal in the turtle's inventory, it immediately stops and returns to Home.
 3. **Teleport Back to Base**:
    - When the Turtle's 16-slot inventory is **full**, or when **no ores are left** in the passed list, the Turtle **teleports back to Home** via `automata.warpToPoint("home")` and aligns with Home (only digging its way back if there is not enough fuel to teleport).
 4. **Unload into Sophisticated Storage Barrel**:
-   - Back at the base, the Turtle places **everything** in its inventory into the **Sophisticated Storage Barrel** (`sophisticatedstorage:*barrel*`) to its side/front, **with the exception of any Energy Cube** in its inventory (which stays for fuel).
+   - Back at the base, the Turtle places **all ores and excess items** into the **Sophisticated Storage Barrel** (`sophisticatedstorage:*barrel*`) to its side/front, **always keeping a full stack (64) of any fuel item** (coal, charcoal, etc.) and keeping any Energy Cube / tools / modem for fuel and operation.
 5. **Repeat**:
    - The Turtle requests the next scan from the Base Computer and the cycle repeats automatically!
 

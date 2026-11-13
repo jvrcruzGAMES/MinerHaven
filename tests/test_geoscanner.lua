@@ -241,6 +241,7 @@ assertTrue(writtenFiles["/startup/99_minerhaven.lua"]:find("turtle_miner.lua", 1
 --    Idle -> Start -> Mine ores by tag until inventory full -> Return Home -> Wait until ores unloaded -> Resume -> Stop (stays idle, does not exit)
 local mockInv = {}
 for s = 1, 16 do mockInv[s] = nil end
+mockInv[16] = { name = "minecraft:coal", count = 64, tags = {} }
 
 local worldOres = {
     { name = "minecraft:diamond_ore", x = 2, y = 0, z = -1, tags = { "forge:ores" } },
@@ -261,13 +262,13 @@ assertEq(miner.home.z, 20, "home Z saved as 20")
 assertEq(miner.home.dir, 0, "home dir saved as North (0)")
 
 local function fillInventoryWithOres()
-    for s = 1, 16 do
+    for s = 1, 15 do
         mockInv[s] = { name = "minecraft:diamond_ore", count = 1, tags = { ["forge:ores"] = true } }
     end
 end
 
 local function clearOresFromInventory()
-    for s = 1, 16 do
+    for s = 1, 15 do
         mockInv[s] = nil
     end
 end
@@ -388,12 +389,16 @@ local function getFrontCoord(pos)
     return pos.x + v.x, pos.y, pos.z + v.z
 end
 
+local miner2Inv = {
+    [1] = { name = "minecraft:coal", count = 64, tags = {} },
+}
+
 _G.turtle = {
     getFuelLevel = function() return 5000 end,
     getSelectedSlot = function() return 1 end,
     select = function() return true end,
-    getItemCount = function() return 0 end,
-    getItemDetail = function() return nil end,
+    getItemCount = function(s) return miner2Inv[s] and miner2Inv[s].count or 0 end,
+    getItemDetail = function(s) return miner2Inv[s] end,
     turnLeft = function() return true end,
     turnRight = function() return true end,
     detect = function()
@@ -653,6 +658,7 @@ _G.peripheral = {
 local automataInv = {
     [1] = { name = "minecraft:diamond_pickaxe", count = 1, tags = {} },
     [2] = { name = "mekanism:energy_tablet", count = 1, energy = 1000, tags = {} },
+    [16] = { name = "minecraft:coal", count = 64, tags = {} },
 }
 local autoSelectedSlot = 1
 
@@ -874,9 +880,11 @@ baseComp = baseComputerMod.new({
 })
 
 -- Set up Turtle inventory: Slot 1 has an Energy Cube (`mekanism:ultimate_energy_cube`), which MUST stay in the turtle for fuel!
+-- Slot 16 has a full stack of coal (`minecraft:coal`), which MUST stay in the turtle as fuel!
 local barrelStoredItems = {}
 local turtle4Inv = {
     [1] = { name = "mekanism:ultimate_energy_cube", count = 1, energy = 5000, tags = {} },
+    [16] = { name = "minecraft:coal", count = 64, tags = {} },
 }
 local t4Slot = 1
 local t4WarpCalls = 0
@@ -958,14 +966,18 @@ _G.turtle = {
     placeDown = function() return false end,
     placeUp = function() return false end,
     place = function() return false end,
-    drop = function()
+    drop = function(dropCount)
         -- Only allow dropping into the Sophisticated Storage Barrel at Home facing North (0)!
         assertTrue(turtleMiner4:isAtHome(), "turtle only drops items when back at Home")
         assertEq(turtleMiner4.pos.dir, 0, "turtle faces the Sophisticated Storage Barrel when unloading")
         local item = turtle4Inv[t4Slot]
         if item then
-            table.insert(barrelStoredItems, { name = item.name, count = item.count })
-            turtle4Inv[t4Slot] = nil
+            local toDrop = (dropCount and dropCount > 0 and dropCount < item.count) and dropCount or item.count
+            table.insert(barrelStoredItems, { name = item.name, count = toDrop })
+            item.count = item.count - toDrop
+            if item.count <= 0 then
+                turtle4Inv[t4Slot] = nil
+            end
             return true
         end
         return false
@@ -1001,6 +1013,7 @@ assertEq(t4WarpCalls, 1, "Turtle teleported back to Home using End Automata when
 assertTrue(turtleMiner4:isAtHome(), "Turtle is back at Home (0,0,0)")
 assertEq(turtleMiner4.pos.dir, 0, "Turtle is aligned with Home facing North (0)")
 assertTrue(turtle4Inv[1] ~= nil and turtle4Inv[1].name == "mekanism:ultimate_energy_cube", "Energy Cube stayed in Turtle's inventory for fuel")
+assertTrue(turtle4Inv[16] ~= nil and turtle4Inv[16].name == "minecraft:coal" and turtle4Inv[16].count == 64, "Coal stack of 64 stayed in Turtle's storage")
 assertEq(turtle4Inv[2], nil, "Diamonds were placed into the Sophisticated Storage Barrel")
 assertEq(turtle4Inv[3], nil, "Leftover cobbled_deepslate was placed into the Sophisticated Storage Barrel")
 assertEq(turtle4Inv[4], nil, "Raw iron was placed into the Sophisticated Storage Barrel")
@@ -1012,6 +1025,7 @@ assertEq(s3, "mined", "Step 3: Cycle repeated automatically — requested new sc
 assertEq(baseScanCycle, 2, "Base Computer performed second Geo Scanner scan for the new cycle")
 assertEq(t4WarpCalls, 2, "Turtle teleported Home again at the end of the second cycle")
 assertTrue(turtle4Inv[1] ~= nil and turtle4Inv[1].name == "mekanism:ultimate_energy_cube", "Energy Cube still kept in Turtle's inventory")
+assertTrue(turtle4Inv[16] ~= nil and turtle4Inv[16].name == "minecraft:coal" and turtle4Inv[16].count == 64, "Coal stack of 64 still kept in Turtle's storage")
 
 -- 11. Test Pickaxe Auto-Equip, Netherrack Breaking, and Java Exception Protection:
 --     11A: Inventory keeps pickaxe, modem, and energy items so they are never unloaded into the barrel or placed as waste
@@ -1062,5 +1076,108 @@ assertTrue(digSuccess, "tryDigDirection succeeded in breaking netherrack")
 assertTrue(netherrackDugNatively, "Netherrack was broken natively via turtle.dig with auto-equipped pickaxe")
 assertEq(toolEquippedOnRight, "minecraft:diamond_pickaxe", "Pickaxe was auto-equipped onto the right side")
 assertEq(turtle4Inv[2].name, "computercraft:wireless_modem_advanced", "Ender Modem was placed into inventory slot")
+
+-- 12. Test Keeping a Stack (64) of Any Fuel Item & Emergency Return When No Coal:
+--     12A: Unloading into barrel keeps up to a full stack (64) of fuel items, depositing excess fuel and all ores
+local test12Inv = {
+    [1] = { name = "minecraft:coal", count = 64 },      -- Full stack of coal: MUST be kept
+    [2] = { name = "minecraft:coal", count = 16 },      -- Excess 16 coal: MUST be deposited
+    [3] = { name = "minecraft:charcoal", count = 64 },  -- Full stack of charcoal: MUST be kept
+    [4] = { name = "minecraft:charcoal", count = 20 },  -- Excess 20 charcoal: MUST be deposited
+    [5] = { name = "minecraft:raw_iron", count = 32 },  -- Mined ore: MUST be deposited
+    [6] = { name = "mekanism:ultimate_energy_cube", count = 1 }, -- Energy Cube: MUST be kept
+}
+local test12Barrel = {}
+local test12Selected = 1
+
+local miner5 = turtleMinerMod.new({
+    automata = t4Automata,
+})
+miner5.pos = { x = 0, y = 0, z = 0, dir = 0 }
+miner5:sethome("n")
+
+_G.turtle = {
+    getFuelLevel = function() return 1000 end,
+    getSelectedSlot = function() return test12Selected end,
+    select = function(s) test12Selected = s; return true end,
+    getItemCount = function(s) return test12Inv[s] and test12Inv[s].count or 0 end,
+    getItemDetail = function(s) return test12Inv[s] end,
+    inspect = function() return true, { name = "sophisticatedstorage:barrel" } end,
+    inspectUp = function() return false end,
+    inspectDown = function() return false end,
+    turnLeft = function() return true end,
+    turnRight = function() return true end,
+    forward = function() return true end,
+    up = function() return true end,
+    down = function() return true end,
+    drop = function(dropCount)
+        local item = test12Inv[test12Selected]
+        if item then
+            local toDrop = (dropCount and dropCount > 0 and dropCount < item.count) and dropCount or item.count
+            table.insert(test12Barrel, { name = item.name, count = toDrop })
+            item.count = item.count - toDrop
+            if item.count <= 0 then
+                test12Inv[test12Selected] = nil
+            end
+            return true
+        end
+        return false
+    end,
+}
+
+assertTrue(miner5:hasItemsToUnload(), "miner5 detects excess fuel and ores that must be unloaded")
+local unloadedCount = miner5:unloadToBarrel()
+assertTrue(unloadedCount >= 3, "unloaded excess coal, excess charcoal, and raw iron")
+
+-- Verify inventory contents after depositing:
+assertEq(test12Inv[1].count, 64, "Kept exactly a stack of 64 coal in slot 1")
+assertEq(test12Inv[2], nil, "Excess 16 coal was unloaded from slot 2 into barrel")
+assertEq(test12Inv[3].count, 64, "Kept exactly a stack of 64 charcoal in slot 3")
+assertEq(test12Inv[4], nil, "Excess 20 charcoal was unloaded from slot 4 into barrel")
+assertEq(test12Inv[5], nil, "All 32 raw iron was unloaded from slot 5 into barrel")
+assertEq(test12Inv[6].name, "mekanism:ultimate_energy_cube", "Energy Cube stayed in slot 6")
+
+-- Verify barrel received the expected items:
+local totalCoalInBarrel = 0
+local totalCharcoalInBarrel = 0
+local totalIronInBarrel = 0
+for _, deposited in ipairs(test12Barrel) do
+    if deposited.name == "minecraft:coal" then
+        totalCoalInBarrel = totalCoalInBarrel + deposited.count
+    elseif deposited.name == "minecraft:charcoal" then
+        totalCharcoalInBarrel = totalCharcoalInBarrel + deposited.count
+    elseif deposited.name == "minecraft:raw_iron" then
+        totalIronInBarrel = totalIronInBarrel + deposited.count
+    end
+end
+assertEq(totalCoalInBarrel, 16, "Barrel received exactly 16 excess coal")
+assertEq(totalCharcoalInBarrel, 20, "Barrel received exactly 20 excess charcoal")
+assertEq(totalIronInBarrel, 32, "Barrel received all 32 raw iron")
+assertEq(miner5:hasItemsToUnload(), false, "No more items to unload once only 64 fuel and Energy Cube remain")
+assertEq(miner5:hasOresInInventory(), false, "Kept fuel stacks are not considered undeposited ores")
+
+--     12B: Turtle immediately returns to Home when there is no coal in inventory:
+-- Simulate turtle out in the field at (5, -3, 7) with 0 coal in inventory!
+test12Inv[1] = nil -- remove coal
+test12Inv[3] = nil -- remove charcoal
+miner5.pos = { x = 5, y = -3, z = 7, dir = 2 }
+miner5.running = true
+assertEq(miner5:hasCoal(), false, "Turtle has 0 coal in inventory")
+
+local emergencyStep = miner5:stepWorker()
+assertEq(emergencyStep, "returned_home", "Turtle immediately returned to Home when out of coal")
+assertTrue(miner5:isAtHome(), "Turtle is back at Home (0, 0, 0)")
+assertEq(miner5.phase, "WAITING FOR COAL", "Phase transitioned to WAITING FOR COAL")
+
+-- If stepWorker is called again while still having 0 coal at Home, it stays idle:
+local idleStep = miner5:stepWorker()
+assertEq(idleStep, "no_coal", "Turtle stays idle at Home when coal is 0")
+assertTrue(miner5:isAtHome(), "Turtle stays at Home")
+
+-- Once coal is added to inventory, it resumes:
+test12Inv[1] = { name = "minecraft:coal", count = 64 }
+miner5.oreQueue = { { name = "minecraft:diamond_ore", x = 1, y = 0, z = 0, fromHome = true } }
+local resumeStep = miner5:stepWorker()
+assertEq(miner5.phase, "MINING", "Turtle resumes mining once coal is placed in inventory")
 
 print(("ALL %d ASSERTIONS PASSED!"):format(passed))
