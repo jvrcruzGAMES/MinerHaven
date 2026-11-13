@@ -205,33 +205,37 @@ end
 function Controller:handlePacket(payload, fromId)
     if not payload or type(payload) ~= "table" then return end
 
-    if not self.workers[fromId] then
-        self.workers[fromId] = {
-            name = "Turtle " .. fromId,
+    local idNum = tonumber(fromId)
+    local workerEntry = self.workers[fromId] or (idNum and self.workers[idNum]) or self.workers[tostring(fromId)]
+    if not workerEntry then
+        workerEntry = {
+            name = "Turtle " .. tostring(fromId),
             telemetry = {},
             lastSeen = 0,
         }
+        self.workers[idNum or fromId] = workerEntry
     end
-    self.workers[fromId].lastSeen = os.clock and os.clock() or os.time()
+    workerEntry.lastSeen = os.clock and os.clock() or os.time()
 
     local pType = payload.type
     if pType == "telemetry" then
-        self.workers[fromId].telemetry = {
+        workerEntry.telemetry = {
             phase = payload.phase or "Active",
             x = payload.x or 0,
             y = payload.y or 0,
             z = payload.z or 0,
             fuel = payload.fuel or "?",
+            coal = payload.coal or 0,
             usedSlots = payload.usedSlots or 0,
             lastAction = payload.lastAction or "Working...",
-            inventory = payload.inventory or {},
+            currentTarget = payload.currentTarget,
         }
     elseif pType == "request_ores" then
         -- Turtle requested ores. Authoritative radius: ALWAYS use self.config.scanRadius!
         self:sendOreLocations(fromId)
     elseif pType == "status_update" then
         if payload.status then
-            self.workers[fromId].telemetry.phase = payload.status
+            workerEntry.telemetry.phase = payload.status
         end
     end
 end

@@ -170,23 +170,36 @@ end
 -- @tparam number remoteId Remote computer ID
 -- @tparam string sessionKey Binary or hex key
 function Node:setSessionKey(remoteId, sessionKey)
-    self.sessions[remoteId] = {
+    local s = {
         key = sessionKey,
         rxSeq = 0,
         txSeq = 0
     }
-    self.seenSequences[remoteId] = {}
+    self.sessions[remoteId] = s
+    local rNum = tonumber(remoteId)
+    if rNum then self.sessions[rNum] = s end
+    self.sessions[tostring(remoteId)] = s
+
+    local seqs = {}
+    self.seenSequences[remoteId] = seqs
+    if rNum then self.seenSequences[rNum] = seqs end
+    self.seenSequences[tostring(remoteId)] = seqs
 end
 
 --- Get session info for a remote node ID.
 function Node:getSession(remoteId)
-    return self.sessions[remoteId]
+    local rNum = tonumber(remoteId)
+    return self.sessions[remoteId] or (rNum and self.sessions[rNum]) or self.sessions[tostring(remoteId)]
 end
 
 --- Remove session key for a remote node ID.
 function Node:clearSession(remoteId)
     self.sessions[remoteId] = nil
+    local rNum = tonumber(remoteId)
+    if rNum then self.sessions[rNum] = nil end
+    self.sessions[tostring(remoteId)] = nil
     self.seenSequences[remoteId] = nil
+    if rNum then self.seenSequences[rNum] = nil end
 end
 
 --- Transmit a raw packet over the specified channel.
@@ -210,7 +223,8 @@ end
 -- @treturn boolean Success
 -- @treturn string|nil Error
 function Node:send(targetId, payload)
-    local session = self.sessions[targetId]
+    local targetNum = tonumber(targetId)
+    local session = self.sessions[targetId] or (targetNum and self.sessions[targetNum]) or self.sessions[tostring(targetId)]
     if not session or not session.key then
         return false, "No paired session key for node " .. tostring(targetId)
     end
@@ -223,13 +237,13 @@ function Node:send(targetId, payload)
 
     -- Sign packet header + ciphertext
     local signData = string.format("%d:%d:%d:%d:%s:%s",
-        Workernet.PROTOCOL_VERSION, self.localId, targetId, seq, nonce, cipherText)
+        Workernet.PROTOCOL_VERSION, self.localId, targetNum or targetId, seq, nonce, cipherText)
     local sig = Crypto.hmacSha256(session.key, signData)
 
     local packet = {
         _v = Workernet.PROTOCOL_VERSION,
         from = self.localId,
-        to = targetId,
+        to = targetNum or targetId,
         seq = seq,
         nonce = nonce,
         data = cipherText,
@@ -263,12 +277,14 @@ function Node:unpackPacket(packet)
     if packet._v ~= Workernet.PROTOCOL_VERSION then
         return nil, nil, "Protocol version mismatch"
     end
-    if packet.to ~= self.localId and packet.to ~= -1 then
+    local toMatch = (packet.to == self.localId) or (packet.to == -1)
+        or (tonumber(packet.to) and tonumber(packet.to) == tonumber(self.localId))
+    if not toMatch then
         return nil, nil, "Packet destination not for this node"
     end
 
-    local fromId = packet.from
-    local session = self.sessions[fromId]
+    local fromId = tonumber(packet.from) or packet.from
+    local session = self.sessions[fromId] or self.sessions[packet.from] or self.sessions[tostring(packet.from)]
     if not session or not session.key then
         return nil, fromId, "No active session key for sender " .. tostring(fromId)
     end

@@ -186,40 +186,25 @@ function Worker:ensureAutomata()
     return nil
 end
 
-function Worker:ensurePickaxeEquipped()
-    if not turtle or not turtle.getItemDetail then return false end
-    local _, automataSide = self:ensureAutomata()
-    local toolSide = (automataSide == "left") and "right" or "left"
+function Worker:isSenderController(fromId)
+    if not self.controllerId or not fromId then return false end
+    return (fromId == self.controllerId)
+        or (tonumber(fromId) and tonumber(fromId) == tonumber(self.controllerId))
+        or (tostring(fromId) == tostring(self.controllerId))
+end
 
-    -- Check if tool is already equipped
-    local currentToolType = peripheral and peripheral.getType(toolSide)
-    if currentToolType == nil or currentToolType == "tool" then
-        -- Native CC tool does not register as peripheral
-    end
-
-    local prevSlot = turtle.getSelectedSlot and turtle.getSelectedSlot() or 1
+function Worker:selectToolSlot()
+    if not turtle or not turtle.getItemDetail then return end
     for slot = 1, 16 do
         local detail = turtle.getItemDetail(slot)
         if detail and detail.name then
             local lower = detail.name:lower()
             if lower:find("pickaxe", 1, true) or lower:find("drill", 1, true) then
                 turtle.select(slot)
-                local equipped = false
-                if toolSide == "right" and turtle.equipRight then
-                    equipped = turtle.equipRight()
-                elseif toolSide == "left" and turtle.equipLeft then
-                    equipped = turtle.equipLeft()
-                end
-                turtle.select(prevSlot)
-                if equipped then
-                    self.pickaxeSide = toolSide
-                    return true
-                end
+                return slot
             end
         end
     end
-    turtle.select(prevSlot)
-    return false
 end
 
 --------------------------------------------------------------------------------
@@ -423,15 +408,101 @@ function Worker:turnTo(targetDir)
     return self.pos.dir == targetDir
 end
 
-function Worker:nativeDig(dirStr)
-    self:ensurePickaxeEquipped()
-    if dirStr == "up" then
-        return turtle.digUp()
-    elseif dirStr == "down" then
-        return turtle.digDown()
-    else
-        return turtle.dig()
+function Worker:digBlock(dirStr)
+    local detectFn = (dirStr == "up" and turtle.detectUp) or (dirStr == "down" and turtle.detectDown) or turtle.detect
+    local suckFn = (dirStr == "up" and turtle.suckUp) or (dirStr == "down" and turtle.suckDown) or turtle.suck
+    local inspectFn = (dirStr == "up" and turtle.inspectUp) or (dirStr == "down" and turtle.inspectDown) or turtle.inspect
+
+    -- If no block is present in that direction, nothing to dig!
+    if detectFn and not detectFn() then
+        return true
     end
+
+    -- Protection check: NEVER break base blocks!
+    if inspectFn then
+        local hasB, bData = inspectFn()
+        if hasB and self:isProtectedBlock(bData.name) then
+            return false, "protected_block"
+        end
+    end
+
+    -- 1. Try native CC dig if turtle tool happens to be available
+    local nativeDigFn = (dirStr == "up" and turtle.digUp) or (dirStr == "down" and turtle.digDown) or turtle.dig
+    if nativeDigFn then
+        local ok = nativeDigFn()
+        if ok or (detectFn and not detectFn()) then
+            if suckFn then pcall(suckFn) end
+            return true
+        end
+    end
+
+    -- 2. Use End Automata digBlock
+    local automata = self:ensureAutomata()
+    if not automata or type(automata.digBlock) ~= "function" then
+        return false, "no_automata"
+    end
+
+    local rotOpts = { yaw = 0, pitch = 0 }
+    if dirStr == "up" then
+        rotOpts = { yaw = 0, pitch = -90 }
+    elseif dirStr == "down" then
+        rotOpts = { yaw = 0, pitch = 90 }
+    end
+
+    local prevSlot = turtle and turtle.getSelectedSlot and turtle.getSelectedSlot() or 1
+    self:selectToolSlot()
+
+    local maxTries = 8
+    for _ = 1, maxTries do
+        -- Handle End Automata dig cooldown
+        if type(automata.getDigCooldown) == "function" then
+            local cdOk, cd = pcall(automata.getDigCooldown)
+            if cdOk and type(cd) == "number" and cd > 0 then
+                if os.sleep then os.sleep(math.min(cd / 1000, 0.4)) end
+            end
+        end
+
+        local ok, res = pcall(automata.digBlock, rotOpts)
+
+        -- Collect dropped items
+        if type(automata.collectItems) == "function" then
+            pcall(automata.collectItems)
+        end
+        if suckFn then
+            pcall(suckFn)
+        end
+
+        -- Check if block was destroyed (handles AP 0.8.2a awardStat NPE where block was destroyed before exception)
+        if detectFn and not detectFn() then
+            if turtle and turtle.select then turtle.select(prevSlot) end
+            return true
+        end
+
+        if ok and res == true then
+            if turtle and turtle.select then turtle.select(prevSlot) end
+            return true
+        end
+
+        local errStr = tostring(res or "")
+        if errStr:lower():find("cooldown") then
+            if os.sleep then os.sleep(0.3) end
+        elseif errStr:find("Java exception", 1, true) or errStr:find("NullPointerException", 1, true) then
+            -- In AP 0.8.2a, awardStat throws NPE if holding a tool that awards stats;
+            -- switch to an empty slot or non-tool slot to break it
+            for s = 1, 16 do
+                if turtle.getItemCount(s) == 0 then
+                    turtle.select(s)
+                    break
+                end
+            end
+            if os.sleep then os.sleep(0.1) end
+        else
+            if os.sleep then os.sleep(0.1) end
+        end
+    end
+
+    if turtle and turtle.select then turtle.select(prevSlot) end
+    return (detectFn and not detectFn())
 end
 
 function Worker:moveForward()
@@ -441,10 +512,9 @@ function Worker:moveForward()
 
     if self:isBlocked(nx, ny, nz) then return false, "blocked_coordinate" end
 
-    local hasB, bData = turtle.inspect()
-    if hasB then
-        if self:isProtectedBlock(bData.name) then return false, "protected_block" end
-        self:nativeDig("forward")
+    if turtle.detect and turtle.detect() then
+        local ok, err = self:digBlock("forward")
+        if not ok then return false, err end
     end
 
     if turtle.forward() then
@@ -452,6 +522,17 @@ function Worker:moveForward()
         self:savePos()
         self:placeWasteBehind()
         return true
+    end
+
+    -- If forward failed, retry dig (e.g. fallen sand/gravel)
+    if turtle.detect and turtle.detect() then
+        self:digBlock("forward")
+        if turtle.forward() then
+            self.pos.x, self.pos.z = nx, nz
+            self:savePos()
+            self:placeWasteBehind()
+            return true
+        end
     end
     return false
 end
@@ -461,10 +542,9 @@ function Worker:moveDown()
     local nx, ny, nz = self.pos.x, self.pos.y - 1, self.pos.z
     if self:isBlocked(nx, ny, nz) then return false, "blocked_coordinate" end
 
-    local hasB, bData = turtle.inspectDown()
-    if hasB then
-        if self:isProtectedBlock(bData.name) then return false, "protected_block" end
-        self:nativeDig("down")
+    if turtle.detectDown and turtle.detectDown() then
+        local ok, err = self:digBlock("down")
+        if not ok then return false, err end
     end
 
     if turtle.down() then
@@ -472,6 +552,16 @@ function Worker:moveDown()
         self:savePos()
         self:placeWasteBehind()
         return true
+    end
+
+    if turtle.detectDown and turtle.detectDown() then
+        self:digBlock("down")
+        if turtle.down() then
+            self.pos.y = ny
+            self:savePos()
+            self:placeWasteBehind()
+            return true
+        end
     end
     return false
 end
@@ -481,10 +571,9 @@ function Worker:moveUp()
     local nx, ny, nz = self.pos.x, self.pos.y + 1, self.pos.z
     if self:isBlocked(nx, ny, nz) then return false, "blocked_coordinate" end
 
-    local hasB, bData = turtle.inspectUp()
-    if hasB then
-        if self:isProtectedBlock(bData.name) then return false, "protected_block" end
-        self:nativeDig("up")
+    if turtle.detectUp and turtle.detectUp() then
+        local ok, err = self:digBlock("up")
+        if not ok then return false, err end
     end
 
     if turtle.up() then
@@ -492,6 +581,16 @@ function Worker:moveUp()
         self:savePos()
         self:placeWasteBehind()
         return true
+    end
+
+    if turtle.detectUp and turtle.detectUp() then
+        self:digBlock("up")
+        if turtle.up() then
+            self.pos.y = ny
+            self:savePos()
+            self:placeWasteBehind()
+            return true
+        end
     end
     return false
 end
@@ -610,8 +709,10 @@ function Worker:sendTelemetry()
         y = self.pos.y,
         z = self.pos.z,
         fuel = fuel,
+        coal = self:getCoalCount(),
         usedSlots = self:getUsedSlotCount(),
         lastAction = self.lastAction,
+        currentTarget = self.currentTarget,
     }
     self.net:send(self.controllerId, payload)
 end
@@ -621,6 +722,7 @@ function Worker:requestOresFromController()
     self.phase = "WAITING FOR ORES"
     self.lastAction = "Requesting ores from Controller..."
     self:renderHeadlessUI()
+    self:sendTelemetry()
 
     -- Notice: We do NOT send any scan radius, so the Controller uses its authoritative radius!
     local payload = {
@@ -637,7 +739,7 @@ function Worker:requestOresFromController()
         if now >= deadline then break end
 
         local raw, fromId = self.net:pullMessage(0.5)
-        if raw and fromId == self.controllerId then
+        if raw and self:isSenderController(fromId) then
             if raw.type == "ore_locations" then
                 self:handleOreBatch(raw)
                 return true
@@ -677,10 +779,14 @@ function Worker:handleOreBatch(payload)
 
     if payload.running ~= nil then
         self.running = payload.running
+        if self.running and (self.phase:find("STOP") or self.phase:find("IDLE") or self.phase:find("WAIT")) then
+            self.phase = "MINING"
+        end
     end
 
     self.lastAction = string.format("Received %d ore(s) from Controller (r=%d)", #self.oreQueue, payload.scanRadius or 0)
     self:renderHeadlessUI()
+    self:sendTelemetry()
 end
 
 function Worker:handleCommand(payload)
@@ -708,59 +814,92 @@ end
 --------------------------------------------------------------------------------
 
 function Worker:mineToTarget(target)
-    self.lastAction = string.format("Moving to ore (%+d, %+d, %+d)...", target.x, target.y, target.z)
+    self.currentTarget = target.name
+    self.lastAction = string.format("Mining %s at (%+d, %+d, %+d)...", tostring(target.name or "ore"), target.x, target.y, target.z)
     self:renderHeadlessUI()
+    self:sendTelemetry()
 
-    -- 1. Priority -Y: Move down to target Y first!
-    while self.pos.y > target.y do
-        if not self:hasCoal() then return false, "no_coal" end
-        if not self:moveDown() then break end
-    end
+    local maxSteps = 120
+    local steps = 0
 
-    -- 2. Move X
-    if self.pos.x < target.x then
-        self:turnTo(1)
-        while self.pos.x < target.x do
-            if not self:hasCoal() then return false, "no_coal" end
-            if not self:moveForward() then break end
+    while steps < maxSteps do
+        steps = steps + 1
+
+        local dx = target.x - self.pos.x
+        local dy = target.y - self.pos.y
+        local dz = target.z - self.pos.z
+        local dist = math.abs(dx) + math.abs(dy) + math.abs(dz)
+
+        -- If inside or adjacent (dist <= 1), mine the target with End Automata!
+        if dist == 0 then
+            self.lastAction = "Mined " .. tostring(target.name)
+            return true
+        elseif dist == 1 then
+            if dy == 1 then
+                self:digBlock("up")
+            elseif dy == -1 then
+                self:digBlock("down")
+            else
+                for d, vec in pairs(DIR_VECTORS) do
+                    if vec.x == dx and vec.z == dz then
+                        self:turnTo(d)
+                        self:digBlock("forward")
+                        break
+                    end
+                end
+            end
+            self.lastAction = "Mined " .. tostring(target.name)
+            return true
         end
-    elseif self.pos.x > target.x then
-        self:turnTo(3)
-        while self.pos.x > target.x do
+
+        -- Down-first movement priority (-Y before X/Z)
+        if self.pos.y > target.y then
             if not self:hasCoal() then return false, "no_coal" end
-            if not self:moveForward() then break end
+            if not self:moveDown() then
+                if dx ~= 0 or dz ~= 0 then
+                    -- If down blocked, move horizontally toward target
+                    if dx > 0 then self:turnTo(1); self:moveForward()
+                    elseif dx < 0 then self:turnTo(3); self:moveForward()
+                    elseif dz > 0 then self:turnTo(2); self:moveForward()
+                    elseif dz < 0 then self:turnTo(0); self:moveForward() end
+                else
+                    break
+                end
+            end
+        elseif self.pos.x < target.x then
+            self:turnTo(1)
+            if not self:hasCoal() then return false, "no_coal" end
+            if not self:moveForward() then
+                if self.pos.y < target.y then self:moveUp() else break end
+            end
+        elseif self.pos.x > target.x then
+            self:turnTo(3)
+            if not self:hasCoal() then return false, "no_coal" end
+            if not self:moveForward() then
+                if self.pos.y < target.y then self:moveUp() else break end
+            end
+        elseif self.pos.z < target.z then
+            self:turnTo(2)
+            if not self:hasCoal() then return false, "no_coal" end
+            if not self:moveForward() then
+                if self.pos.y < target.y then self:moveUp() else break end
+            end
+        elseif self.pos.z > target.z then
+            self:turnTo(0)
+            if not self:hasCoal() then return false, "no_coal" end
+            if not self:moveForward() then
+                if self.pos.y < target.y then self:moveUp() else break end
+            end
+        elseif self.pos.y < target.y then
+            if not self:hasCoal() then return false, "no_coal" end
+            if not self:moveUp() then break end
+        else
+            break
         end
     end
 
-    -- 3. Move Z
-    if self.pos.z < target.z then
-        self:turnTo(2)
-        while self.pos.z < target.z do
-            if not self:hasCoal() then return false, "no_coal" end
-            if not self:moveForward() then break end
-        end
-    elseif self.pos.z > target.z then
-        self:turnTo(0)
-        while self.pos.z > target.z do
-            if not self:hasCoal() then return false, "no_coal" end
-            if not self:moveForward() then break end
-        end
-    end
-
-    -- 4. Move Y up if target is higher
-    while self.pos.y < target.y do
-        if not self:hasCoal() then return false, "no_coal" end
-        if not self:moveUp() then break end
-    end
-
-    -- Dig surrounding block if adjacent
-    local isAtTarget = (self.pos.x == target.x and self.pos.y == target.y and self.pos.z == target.z)
-    if isAtTarget then
-        self.lastAction = "Arrived at ore location " .. tostring(target.name)
-        return true
-    end
-
-    return false
+    local finalDist = math.abs(target.x - self.pos.x) + math.abs(target.y - self.pos.y) + math.abs(target.z - self.pos.z)
+    return finalDist <= 1
 end
 
 function Worker:run()
@@ -772,7 +911,7 @@ function Worker:run()
     self:renderHeadlessUI()
     self:sendTelemetry()
 
-    local telemetryTimer = os.startTimer and os.startTimer(2.0) or nil
+    local lastTelemetryTime = os.clock and os.clock() or os.time()
 
     while true do
         self:renderHeadlessUI()
@@ -793,12 +932,19 @@ function Worker:run()
 
         -- Check for incoming remote messages
         local msg, fromId = self.net:pullMessage(0.2)
-        if msg and fromId == self.controllerId then
+        if msg and self:isSenderController(fromId) then
             if msg.type == "command" then
                 self:handleCommand(msg)
             elseif msg.type == "ore_locations" then
                 self:handleOreBatch(msg)
             end
+        end
+
+        -- Periodic telemetry every 2.0 seconds
+        local now = os.clock and os.clock() or os.time()
+        if now - lastTelemetryTime >= 2.0 then
+            self:sendTelemetry()
+            lastTelemetryTime = now
         end
 
         if self.running then
@@ -818,7 +964,7 @@ function Worker:run()
                     self.lastAction = "No ores in scan. Waiting at base..."
                     self:returnToHome()
                     self:unloadToBarrel()
-                    if os.sleep then os.sleep(3.0) end
+                    self.running = false
                 end
             else
                 -- Mine next ore in queue
@@ -835,7 +981,6 @@ function Worker:run()
             end
         else
             self.phase = "IDLE (Remote)"
-            if os.sleep then os.sleep(1.0) end
         end
     end
 end

@@ -208,17 +208,17 @@ function Dashboard:run()
 
     while true do
         self:render()
-        local event, p1, p2, p3 = os.pullEvent()
+        local event, p1, p2, p3, p4, p5 = os.pullEvent()
 
         if event == "timer" and p1 == refreshTimer then
-            self.controller:step(0.01)
             refreshTimer = os.startTimer(1.0)
         elseif event == "modem_message" then
-            -- Let controller process packet
-            local side, channel, replyChannel, message = p1, p2, p3, select(4, event, p1, p2, p3)
-            local payload, fromId = self.controller.net:unpackPacket(message)
-            if payload then
-                self.controller:handlePacket(payload, fromId)
+            local side, channel, replyChannel, message, distance = p1, p2, p3, p4, p5
+            if channel == self.controller.net.channel then
+                local payload, fromId, err = self.controller.net:unpackPacket(message)
+                if payload then
+                    self.controller:handlePacket(payload, fromId)
+                end
             end
         elseif event == "char" then
             self.commandBuffer = self.commandBuffer .. p1

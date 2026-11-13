@@ -1352,4 +1352,60 @@ assertEq(testCtrl.lastScanOres, 2, "Controller scanned and sent 2 ores using aut
 assertEq(testCtrl.ores.turtleOffset.x, 1, "Turtle offset X calibrated from scan")
 assertEq(testCtrl.ores.turtleOffset.z, 1, "Turtle offset Z calibrated from scan")
 
+-- 13.5 Telemetry and Start Command Dispatch
+testCtrl:handlePacket({
+    type = "telemetry",
+    phase = "MINING",
+    fuel = 4500,
+    usedSlots = 5,
+    lastAction = "Mining deepslate_diamond_ore",
+    x = 3, y = -12, z = 4
+}, 5)
+
+local w5 = testCtrl.workers[5]
+assertTrue(w5 ~= nil, "Worker 5 registered in controller")
+assertEq(w5.telemetry.phase, "MINING", "Telemetry phase updated to MINING")
+assertEq(w5.telemetry.fuel, 4500, "Telemetry fuel updated to 4500")
+assertEq(w5.telemetry.usedSlots, 5, "Telemetry usedSlots updated to 5")
+assertEq(w5.telemetry.lastAction, "Mining deepslate_diamond_ore", "Telemetry lastAction updated")
+
+-- 13.6 End Automata digBlock in Worker
+local automataDigCalled = 0
+local mockWorkerAutomata = {
+    digBlock = function(rot)
+        automataDigCalled = automataDigCalled + 1
+        return true
+    end,
+    collectItems = function() return true end,
+    warpToPoint = function() return true end,
+    savePoint = function() return true end,
+}
+local testWorker = Worker.new()
+testWorker.controllerId = 1
+testWorker.ensureAutomata = function() return mockWorkerAutomata, "left" end
+
+-- Mock detect and inspect for an ore block (not a base block)
+local detectCount = 1
+_G.turtle.detect = function()
+    if detectCount > 0 then
+        detectCount = detectCount - 1
+        return true
+    end
+    return false
+end
+_G.turtle.inspect = function()
+    return true, { name = "minecraft:deepslate_diamond_ore" }
+end
+_G.turtle.dig = nil -- ensure native dig is unavailable so End Automata is used!
+
+local digRes, digErr = testWorker:digBlock("forward")
+assertTrue(digRes, "Worker digBlock succeeded using End Automata")
+assertTrue(automataDigCalled >= 1, "End Automata digBlock was invoked to break blocks")
+
+-- Verify Worker:handleCommand("start")
+testWorker.running = false
+testWorker:handleCommand({ action = "start" })
+assertTrue(testWorker.running, "Worker started via remote command")
+assertEq(testWorker.phase, "MINING", "Worker phase is MINING after start command")
+
 print(("ALL %d ASSERTIONS PASSED!"):format(passed))
