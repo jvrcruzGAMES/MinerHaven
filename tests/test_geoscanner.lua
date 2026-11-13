@@ -1408,4 +1408,92 @@ testWorker:handleCommand({ action = "start" })
 assertTrue(testWorker.running, "Worker started via remote command")
 assertEq(testWorker.phase, "MINING", "Worker phase is MINING after start command")
 
+-- 13.7 Per-Worker Set Home and Unpair
+-- Test Controller:setWorkerHome
+local sentCommands = {}
+testCtrl.net.send = function(self, targetId, payload)
+    table.insert(sentCommands, { targetId = targetId, payload = payload })
+    return true
+end
+local homeOk = testCtrl:setWorkerHome(5)
+assertTrue(homeOk, "Controller:setWorkerHome returned true")
+assertEq(#sentCommands, 1, "Command was sent over network")
+assertEq(sentCommands[1].targetId, 5, "Command targeted worker 5")
+assertEq(sentCommands[1].payload.action, "sethome", "Command payload action is sethome")
+
+-- Test Worker:handleCommand({ action = "sethome" })
+testWorker.pos = { x = 3, y = -5, z = 7, dir = 2 }
+testWorker:handleCommand({ action = "sethome" })
+assertEq(testWorker.home.x, 3, "Worker home x updated")
+assertEq(testWorker.home.y, -5, "Worker home y updated")
+assertEq(testWorker.home.z, 7, "Worker home z updated")
+assertEq(testWorker.home.dir, 2, "Worker home dir updated")
+
+-- Test Controller:unpairWorker
+local unpairOk = testCtrl:unpairWorker(5)
+assertTrue(unpairOk, "Controller:unpairWorker returned true")
+assertEq(testCtrl.workers[5], nil, "Worker 5 removed from controller active workers")
+assertEq(#sentCommands, 2, "Unpair command was sent to worker")
+assertEq(sentCommands[2].payload.action, "unpair", "Command payload action is unpair")
+
+-- Test Worker:handleCommand({ action = "unpair" })
+testWorker.running = true
+testWorker:handleCommand({ action = "unpair" })
+assertEq(testWorker.running, false, "Worker stopped after unpair")
+assertEq(testWorker.phase, "UNPAIRED", "Worker phase set to UNPAIRED")
+assertTrue(testWorker.unpairedRequested, "Worker unpairRequested flag set to return to pairing mode")
+
+-- Test Dashboard dynamic button integration and command handling
+local Dashboard = dofile("controller/dashboard.lua")
+local mockDashboardCtrl = {
+    config = { scanRadius = 12, running = false },
+    workers = {
+        [7] = {
+            id = 7,
+            name = "Turtle 7",
+            telemetry = { phase = "Idle", x = 1, y = 2, z = 3, fuel = 500, usedSlots = 2 },
+            lastSeen = 100,
+        }
+    },
+    ores = { turtleOffset = { x = 1, y = 0, z = 1, calibrated = true } },
+    lastScanOres = 0,
+    batchesSent = 0,
+    lastLog = "",
+    setWorkerHomeCalled = nil,
+    unpairWorkerCalled = nil,
+    setWorkerHome = function(self, id) self.setWorkerHomeCalled = id end,
+    unpairWorker = function(self, id) self.unpairWorkerCalled = id end,
+}
+local testDash = Dashboard.new(mockDashboardCtrl)
+testDash:render()
+assertTrue(#testDash.dynamicButtons >= 2, "Dynamic buttons generated for worker")
+local hasHomeBtn, hasUnpairBtn = false, false
+for _, btn in ipairs(testDash.dynamicButtons) do
+    if btn.action == "sethome" and btn.workerId == 7 then hasHomeBtn = true end
+    if btn.action == "unpair" and btn.workerId == 7 then hasUnpairBtn = true end
+end
+assertTrue(hasHomeBtn, "Dashboard rendered [SET HOME] dynamic button for worker 7")
+assertTrue(hasUnpairBtn, "Dashboard rendered [UNPAIR] dynamic button for worker 7")
+
+-- Test dashboard mouse click on dynamic buttons
+for _, btn in ipairs(testDash.dynamicButtons) do
+    if btn.action == "sethome" then
+        testDash:handleMouseClick(1, btn.x1, btn.y)
+    end
+end
+assertEq(mockDashboardCtrl.setWorkerHomeCalled, 7, "Mouse click on [SET HOME] invoked controller:setWorkerHome")
+
+for _, btn in ipairs(testDash.dynamicButtons) do
+    if btn.action == "unpair" then
+        testDash:handleMouseClick(1, btn.x1, btn.y)
+    end
+end
+assertEq(mockDashboardCtrl.unpairWorkerCalled, 7, "Mouse click on [UNPAIR] invoked controller:unpairWorker")
+
+-- Test CLI commands: sethome and unpair
+testDash:handleCommand("sethome 7")
+assertEq(mockDashboardCtrl.setWorkerHomeCalled, 7, "Dashboard handleCommand 'sethome 7' invoked controller:setWorkerHome")
+testDash:handleCommand("unpair 7")
+assertEq(mockDashboardCtrl.unpairWorkerCalled, 7, "Dashboard handleCommand 'unpair 7' invoked controller:unpairWorker")
+
 print(("ALL %d ASSERTIONS PASSED!"):format(passed))

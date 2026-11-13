@@ -20,6 +20,7 @@ function Dashboard.new(controller)
     self.controller = controller
     self.commandBuffer = ""
     self.statusMessage = ""
+    self.dynamicButtons = {}
     self.buttons = {
         { text = "[START]", action = "start", x1 = 2, x2 = 9 },
         { text = "[STOP]",  action = "stop",  x1 = 11, x2 = 17 },
@@ -83,19 +84,64 @@ function Dashboard:render()
     -- Paired Workers Telemetry Section
     local y = 7
     local hasWorkers = false
+    self.dynamicButtons = {}
     for wId, wInfo in pairs(self.controller.workers) do
         hasWorkers = true
         local tel = wInfo.telemetry or {}
         local phase = tel.phase or "Idle"
         local phaseFg = (phase:lower():find("min") or phase:lower():find("run")) and greenFg or valFg
 
-        drawText(2, y, string.format("Worker %d   : ", wId), titleFg, bgCol)
+        drawText(2, y, string.format("Worker %s   : ", tostring(wId)), titleFg, bgCol)
         drawText(15, y, phase, phaseFg, bgCol)
         drawText(28, y, string.format("| Fuel: %s | Inv: %s/16", tostring(tel.fuel or "?"), tostring(tel.usedSlots or 0)), valFg, bgCol)
 
         y = y + 1
         drawText(2, y, "Position   : ", labelFg, bgCol)
         drawText(15, y, string.format("(%+d, %+d, %+d)", tel.x or 0, tel.y or 0, tel.z or 0), valFg, bgCol)
+
+        -- Dynamic per-worker buttons: [SET HOME] [UNPAIR]
+        local btnHomeText = "[SET HOME]"
+        local btnUnpairText = "[UNPAIR]"
+        if w >= 48 then
+            local btnHomeX = 28
+            local btnUnpairX = 39
+            drawText(btnHomeX, y, btnHomeText, btnFg, btnBg)
+            table.insert(self.dynamicButtons, {
+                x1 = btnHomeX,
+                x2 = btnHomeX + #btnHomeText - 1,
+                y = y,
+                action = "sethome",
+                workerId = wId,
+            })
+            drawText(btnUnpairX, y, btnUnpairText, alertFg, btnBg)
+            table.insert(self.dynamicButtons, {
+                x1 = btnUnpairX,
+                x2 = btnUnpairX + #btnUnpairText - 1,
+                y = y,
+                action = "unpair",
+                workerId = wId,
+            })
+        else
+            y = y + 1
+            local btnHomeX = 2
+            local btnUnpairX = 14
+            drawText(btnHomeX, y, btnHomeText, btnFg, btnBg)
+            table.insert(self.dynamicButtons, {
+                x1 = btnHomeX,
+                x2 = btnHomeX + #btnHomeText - 1,
+                y = y,
+                action = "sethome",
+                workerId = wId,
+            })
+            drawText(btnUnpairX, y, btnUnpairText, alertFg, btnBg)
+            table.insert(self.dynamicButtons, {
+                x1 = btnUnpairX,
+                x2 = btnUnpairX + #btnUnpairText - 1,
+                y = y,
+                action = "unpair",
+                workerId = wId,
+            })
+        end
 
         y = y + 1
         drawText(2, y, "Activity   : ", labelFg, bgCol)
@@ -183,10 +229,46 @@ function Dashboard:handleCommand(cmd)
         local list = {}
         for id, _ in pairs(self.controller.workers) do table.insert(list, tostring(id)) end
         self.controller.lastLog = "Paired Workers: " .. (table.concat(list, ", ") or "None")
+    elseif root == "sethome" then
+        local targetId = tonumber(parts[2]) or parts[2]
+        if not targetId then
+            local count = 0
+            local onlyId = nil
+            for id, _ in pairs(self.controller.workers) do
+                count = count + 1
+                onlyId = id
+            end
+            if count == 1 then
+                targetId = onlyId
+            end
+        end
+        if targetId then
+            self.controller:setWorkerHome(targetId)
+        else
+            self.controller.lastLog = "Usage: sethome <workerId>"
+        end
+    elseif root == "unpair" then
+        local targetId = tonumber(parts[2]) or parts[2]
+        if not targetId then
+            local count = 0
+            local onlyId = nil
+            for id, _ in pairs(self.controller.workers) do
+                count = count + 1
+                onlyId = id
+            end
+            if count == 1 then
+                targetId = onlyId
+            end
+        end
+        if targetId then
+            self.controller:unpairWorker(targetId)
+        else
+            self.controller.lastLog = "Usage: unpair <workerId>"
+        end
     elseif root == "quit" or root == "exit" then
         return "quit"
     else
-        self.controller.lastLog = "Unknown command: " .. root .. " (start, stop, scan, radius <r>, pair, quit)"
+        self.controller.lastLog = "Commands: start, stop, scan, rad <r>, sethome [id], unpair [id], pair, quit"
     end
 end
 
@@ -198,6 +280,18 @@ function Dashboard:handleMouseClick(button, x, y)
                 self:executeAction(btn.action)
                 return
             end
+        end
+    end
+
+    -- Check dynamic per-worker buttons
+    for _, btn in ipairs(self.dynamicButtons or {}) do
+        if y == btn.y and x >= btn.x1 and x <= btn.x2 then
+            if btn.action == "sethome" then
+                self.controller:setWorkerHome(btn.workerId)
+            elseif btn.action == "unpair" then
+                self.controller:unpairWorker(btn.workerId)
+            end
+            return
         end
     end
 end

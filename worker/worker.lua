@@ -804,6 +804,24 @@ function Worker:handleCommand(payload)
     elseif action == "return_home" then
         self:returnToHome()
         self:unloadToBarrel()
+    elseif action == "sethome" then
+        self.home = {
+            x = self.pos.x,
+            y = self.pos.y,
+            z = self.pos.z,
+            dir = self.pos.dir,
+        }
+        self:saveHome()
+        self:saveHomeWarpPoint()
+        self.lastAction = string.format("Home set to (%+d, %+d, %+d) [%s] by Controller",
+            self.home.x, self.home.y, self.home.z, DIR_NAMES[self.home.dir or 0] or "N")
+    elseif action == "unpair" then
+        self.running = false
+        self.phase = "UNPAIRED"
+        self.lastAction = "Unpaired by Controller."
+        Device.unpair()
+        self.controllerId = nil
+        self.unpairedRequested = true
     end
     self:renderHeadlessUI()
     self:sendTelemetry()

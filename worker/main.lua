@@ -34,17 +34,22 @@ local Pairing = loadFile("worker/pairing.lua")
 local Worker = loadFile("worker/worker.lua")
 
 local function main()
-    local isPaired, pCfg = Device.isPaired()
-    if not isPaired then
-        local pairedCfg, err = Pairing.run()
-        if not pairedCfg then
-            print("Pairing not completed. Worker cannot start.")
-            return
+    while true do
+        local isPaired, pCfg = Device.isPaired()
+        if not isPaired then
+            local pairedCfg, err = Pairing.run()
+            if not pairedCfg then
+                print("Pairing not completed. Worker cannot start.")
+                return
+            end
+        end
+
+        local worker = Worker.new()
+        worker:run()
+        if not worker.unpairedRequested then
+            break
         end
     end
-
-    local worker = Worker.new()
-    worker:run()
 end
 
 local ok, err = pcall(main)

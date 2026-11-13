@@ -201,6 +201,41 @@ function Controller:stopWorkers()
     self:broadcastCommand("stop")
 end
 
+--- Send set home command to a specific worker.
+function Controller:setWorkerHome(workerId)
+    local targetNum = tonumber(workerId) or workerId
+    local payload = {
+        type = "command",
+        action = "sethome",
+    }
+    local ok, err = self.net:send(targetNum, payload)
+    if ok then
+        self.lastLog = string.format("Sent 'set home' command to Worker %s", tostring(workerId))
+        return true
+    else
+        self.lastLog = string.format("Failed to send 'set home' to Worker %s: %s", tostring(workerId), tostring(err))
+        return false, err
+    end
+end
+
+--- Unpair a specific worker.
+function Controller:unpairWorker(workerId)
+    local targetNum = tonumber(workerId) or workerId
+    -- Send remote unpair command to the worker so it enters pairing mode
+    local payload = {
+        type = "command",
+        action = "unpair",
+    }
+    self.net:send(targetNum, payload)
+
+    -- Unpair locally on controller
+    Pairing.unpairWorker(targetNum, self.net)
+    self.workers[targetNum] = nil
+    self.workers[tostring(targetNum)] = nil
+    self.lastLog = string.format("Worker %s has been unpaired.", tostring(workerId))
+    return true
+end
+
 --- Handle an incoming packet from a worker.
 function Controller:handlePacket(payload, fromId)
     if not payload or type(payload) ~= "table" then return end
