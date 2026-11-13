@@ -273,6 +273,26 @@ if not libOnly then
             })
             writeLuaConfig(stateFile, { running = false })
 
+            -- Save "home" warp point on End Automata if present
+            if peripheral and type(peripheral.find) == "function" then
+                local automataTypes = {
+                    "endAutomata",
+                    "end_automata",
+                    "overpoweredEndAutomata",
+                    "overpowered_end_automata",
+                }
+                for _, aType in ipairs(automataTypes) do
+                    local a = peripheral.find(aType)
+                    if type(a) == "table" and type(a.savePoint) == "function" then
+                        local ok, saved = pcall(a.savePoint, "home")
+                        if ok and saved == true then
+                            logSuccess("End Automata warp point 'home' saved!")
+                        end
+                        break
+                    end
+                end
+            end
+
             logSuccess(("Turtle Home saved to %s (%d, %d, %d)"):format(
                 homeFile, homeData.x, homeData.y, homeData.z
             ))

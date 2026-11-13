@@ -1,16 +1,19 @@
---- MinerHaven Turtle Auto-Miner
--- Startup service & interactive controller for CC: Tweaked Geo Scanner Turtles.
+--- MinerHaven Turtle Auto-Miner (End Automata Edition)
+-- Startup service & interactive controller for CC: Tweaked End Automata + Geo Scanner Turtles.
 --
 -- Features:
---   - Loads automatically on turtle startup (stays alive in IDLE mode when stopped).
---   - Accepts `start` and `stop` instructions (via typed command, hotkeys, mouse click, or CLI).
---   - When STARTED:
---       1. Scans for nearby ores by block tag (`#forge:ores`, `#c:ores`, `#minecraft:*_ores`)
---       2. Navigates to and mines the nearest ores until the turtle's inventory is full
---       3. Returns to the saved Home location (`/home.cfg`)
---       4. Waits at Home until its inventory has no more ores, then resumes mining automatically
---   - When STOPPED:
---       Does NOT terminate; stays idle waiting until `start` is given again.
+--   - Uses an End Automata (`endAutomata` / `end_automata`) instead of a standard Mining Turtle:
+--       * Teleports back to Home via `warpToPoint("home")` and aligns with Home's facing direction
+--       * Keeps the 3D dig-to-home pathfinding system as a fallback when the End Automata breaks
+--         or when the warp fuel cost (`estimateWarpCost("home")`) exceeds available fuel
+--       * Charges the turtle using FE/RF energy items in the inventory via `chargeTurtle()`
+--         (with fallback to `turtle.refuel()` for burnable items)
+--       * Digs blocks using `automata.digBlock()` or side pickaxe, never breaking `allthemodium:teleport_pad`
+--   - Places waste blocks (cobblestone, dirt, cobbled deepslate, stone, etc.) in its path
+--     instead of dropping them.
+--   - Mines all ores across the entire chunk (using `chunkAnalyze()` + vertical chunk sweeps)
+--     rather than stopping after nearby surface ores.
+--   - Loads automatically on turtle startup and stays idle when stopped until `start` is given.
 
 local function setupPackagePath()
     local scriptDir = ""
@@ -43,6 +46,7 @@ local GeoScanner = require("geoscanner")
 local HOME_FILE = "/home.cfg"
 local POS_FILE = "/turtle_pos.cfg"
 local STATE_FILE = "/minerhaven_state.cfg"
+local HOME_WARP_NAME = "home"
 
 -- Direction constants: 0 = North (-Z), 1 = East (+X), 2 = South (+Z), 3 = West (-X)
 local DIR_NAMES = { [0] = "N", [1] = "E", [2] = "S", [3] = "W" }
@@ -58,11 +62,14 @@ local function parseDir(input)
         return input % 4
     end
     if type(input) == "string" then
-        local c = input:match("^%s*(%a)"):lower()
-        if c == "n" then return 0 end
-        if c == "e" then return 1 end
-        if c == "s" then return 2 end
-        if c == "w" then return 3 end
+        local c = input:match("^%s*(%a)")
+        if c then
+            c = c:lower()
+            if c == "n" then return 0 end
+            if c == "e" then return 1 end
+            if c == "s" then return 2 end
+            if c == "w" then return 3 end
+        end
     end
     return 0
 end
@@ -173,15 +180,22 @@ function TurtleMiner.new(opts)
     self.running = savedState and savedState.running == true or false
     self.keepProgramAlive = true
     self.phase = self.running and "MINING" or "IDLE (Stopped)"
-    self.lastAction = self.running and "Resuming mining..." or "Waiting for 'start' instruction..."
+    self.lastAction = self.running and "Resuming chunk mining..." or "Waiting for 'start' instruction..."
     self.scanRadius = tonumber(opts.scanRadius) or 8
-    self.maxExploreSteps = tonumber(opts.maxExploreSteps) or 3
+    self.maxExploreSteps = tonumber(opts.maxExploreSteps) or 16
     self.exploreCount = 0
     self.minedItems = {}
+    self.energyItems = {}
     self.blockedCoords = {}
     self.lastMoveError = nil
     self.commandBuffer = ""
     self.scanner = opts.scanner or nil
+    self.automata = opts.automata or nil
+    self.automataSide = opts.automataSide or nil
+    self.automataBroken = false
+    self.homeWarpSaved = false
+    self.chunkOresRemaining = nil
+    self.lastChunkMiningY = nil
     self.inWorkerStep = false
     self.pendingReturnOnStop = false
 
@@ -203,11 +217,115 @@ function TurtleMiner:isBlocked(x, y, z)
     return self.blockedCoords[coordKey(x, y, z)] == true
 end
 
+--------------------------------------------------------------------------------
+-- End Automata & Geo Scanner Peripheral Management
+--------------------------------------------------------------------------------
+
+--- Find and verify the End Automata peripheral is present and not broken.
+function TurtleMiner:ensureAutomata()
+    if self.automataBroken then
+        self.automata = nil
+        return nil, "End Automata is broken"
+    end
+    if self.automata and GeoScanner.isAutomataPeripheral(self.automata) then
+        -- If connected via CC peripheral API on a specific side, verify it hasn't broken/detached
+        if self.automataSide and peripheral and type(peripheral.isPresent) == "function" then
+            if self.automataSide == "left" or self.automataSide == "right" then
+                if not peripheral.isPresent(self.automataSide) then
+                    self.automata = nil
+                    self.automataSide = nil
+                end
+            end
+        end
+        if self.automata then
+            return self.automata, self.automataSide
+        end
+    end
+
+    local found, sideOrErr = GeoScanner.findAutomata()
+    if found then
+        self.automata = found
+        self.automataSide = sideOrErr
+        return found, sideOrErr
+    end
+    self.automata = nil
+    self.automataSide = nil
+    return nil, sideOrErr
+end
+
+--- Save the current turtle location as the `"home"` warp point on the End Automata.
+function TurtleMiner:saveHomeWarpPoint()
+    local automata = self:ensureAutomata()
+    if not automata or type(automata.savePoint) ~= "function" then
+        return false, "no_automata"
+    end
+    local ok, res, err = pcall(automata.savePoint, HOME_WARP_NAME)
+    if ok and res == true then
+        self.homeWarpSaved = true
+        return true
+    end
+    return false, tostring(err or res or "savePoint failed")
+end
+
+--- Check whether the End Automata currently has `"home"` saved in its warp points list.
+function TurtleMiner:hasHomeWarpPoint(automata)
+    automata = automata or self:ensureAutomata()
+    if not automata then
+        return false
+    end
+    if type(automata.points) == "function" then
+        local ok, pts = pcall(automata.points)
+        if ok and type(pts) == "table" then
+            for k, v in pairs(pts) do
+                if v == HOME_WARP_NAME or k == HOME_WARP_NAME then
+                    return true
+                end
+            end
+            return false
+        end
+    end
+    return true
+end
+
+--- Equip the Geo Scanner from inventory onto the non-Automata side if it was temporarily swapped out.
+function TurtleMiner:tryEquipScanner()
+    if not turtle or not turtle.getItemDetail then
+        return false
+    end
+    local _, automataSide = self:ensureAutomata()
+    local prevSlot = turtle.getSelectedSlot and turtle.getSelectedSlot() or 1
+    for slot = 1, 16 do
+        local detail = turtle.getItemDetail(slot)
+        if detail and detail.name and detail.name:lower():find("geo_scanner", 1, true) then
+            turtle.select(slot)
+            local equipped = false
+            if automataSide == "left" and turtle.equipRight then
+                equipped = turtle.equipRight()
+            elseif automataSide == "right" and turtle.equipLeft then
+                equipped = turtle.equipLeft()
+            elseif turtle.equipLeft then
+                equipped = turtle.equipLeft()
+            elseif turtle.equipRight then
+                equipped = turtle.equipRight()
+            end
+            if turtle.select then turtle.select(prevSlot) end
+            return equipped
+        end
+    end
+    if turtle.select then turtle.select(prevSlot) end
+    return false
+end
+
 function TurtleMiner:ensureScanner()
     if self.scanner then
         return self.scanner
     end
     local s, err = GeoScanner.find()
+    if not s then
+        if self:tryEquipScanner() then
+            s, err = GeoScanner.find()
+        end
+    end
     if s then
         self.scanner = s
         return s
@@ -224,7 +342,8 @@ function TurtleMiner:saveState()
     saveConfigFile(self.stateFile, { running = self.running })
 end
 
---- Set the turtle's Home to the current block it is in and save to disk (`/home.cfg`).
+--- Set the turtle's Home to the current block it is in, save to `/home.cfg`,
+-- and save the `"home"` warp point in the End Automata if present.
 function TurtleMiner:sethome(facingDir)
     local gx, gy, gz = nil, nil, nil
     if gps and type(gps.locate) == "function" then
@@ -254,8 +373,11 @@ function TurtleMiner:sethome(facingDir)
     }
     saveConfigFile(self.homeFile, self.home)
     self:savePos()
-    self.lastAction = ("Home set to current block (%d, %d, %d) [%s]"):format(
-        self.home.x, self.home.y, self.home.z, DIR_NAMES[dir] or "N"
+
+    local warpSaved = self:saveHomeWarpPoint()
+    local warpSuffix = warpSaved and " + Warp" or ""
+    self.lastAction = ("Home set to (%d, %d, %d) [%s]%s"):format(
+        self.home.x, self.home.y, self.home.z, DIR_NAMES[dir] or "N", warpSuffix
     )
     return self.home
 end
@@ -268,7 +390,10 @@ function TurtleMiner:start()
     self.running = true
     self.pendingReturnOnStop = false
     self.phase = "MINING"
-    self.lastAction = "Started! Scanning for nearby ores..."
+    if self:isAtHome() then
+        self:saveHomeWarpPoint()
+    end
+    self.lastAction = "Started! Scanning chunk for ores..."
     self:saveState()
 end
 
@@ -288,6 +413,8 @@ function TurtleMiner:stop()
         else
             if not self:isAtHome() then
                 self:returnToHome()
+            else
+                self:turnTo(self.home.dir or 0)
             end
             self.pendingReturnOnStop = false
             self.phase = "IDLE (Stopped)"
@@ -300,7 +427,7 @@ function TurtleMiner:stop()
 end
 
 --------------------------------------------------------------------------------
--- Inventory & Fuel Management
+-- Inventory, Energy Charging & Waste Placement Management
 --------------------------------------------------------------------------------
 
 function TurtleMiner:snapshotInventoryCounts()
@@ -327,21 +454,28 @@ function TurtleMiner:recordNewlyMinedItems(beforeCounts)
         if detail and detail.name then
             local name = detail.name:lower()
             local prev = beforeCounts[name] or 0
-            if (detail.count or 1) > prev and not GeoScanner.isWasteName(name) then
+            if (detail.count or 1) > prev and not GeoScanner.isWasteName(name) and not self:isFuelOrToolItem(detail) then
                 self.minedItems[name] = true
             end
         end
     end
 end
 
---- Check if an item should be kept as fuel or a tool (so it isn't dropped as waste).
+--- Check if an item is an energy battery/cell, fuel, or tool/peripheral so it is never placed as waste or unloaded as ore.
 function TurtleMiner:isFuelOrToolItem(detail)
     if type(detail) ~= "table" or type(detail.name) ~= "string" then
         return false
     end
     local name = detail.name:lower()
+    if self.energyItems[name] or GeoScanner.isEnergyItemName(name) then
+        return true
+    end
     if name:find("pickaxe", 1, true)
+        or name:find("paxel", 1, true)
+        or name:find("drill", 1, true)
         or name:find("scanner", 1, true)
+        or name:find("automata", 1, true)
+        or name:find("_core", 1, true)
         or name:find("coal", 1, true)
         or name:find("charcoal", 1, true)
         or name == "minecraft:lava_bucket"
@@ -352,6 +486,210 @@ function TurtleMiner:isFuelOrToolItem(detail)
     end
     return false
 end
+
+--- Check if an inventory item detail is a placeable non-ore waste block (dirt, cobblestone, stone, deepslate, etc.).
+function TurtleMiner:isWasteItem(detail)
+    if type(detail) ~= "table" or type(detail.name) ~= "string" then
+        return false
+    end
+    if self:isFuelOrToolItem(detail) then
+        return false
+    end
+    if GeoScanner.isOreItem(detail, self.minedItems) then
+        return false
+    end
+    return true
+end
+
+--- Find the first inventory slot containing a non-ore waste block.
+function TurtleMiner:findWasteSlot()
+    if not turtle or not turtle.getItemDetail then
+        return nil
+    end
+    for slot = 1, 16 do
+        local count = turtle.getItemCount and turtle.getItemCount(slot) or 0
+        if count > 0 then
+            local detail = turtle.getItemDetail(slot, true)
+            if detail and self:isWasteItem(detail) then
+                return slot
+            end
+        end
+    end
+    return nil
+end
+
+function TurtleMiner:isHomeCoord(x, y, z)
+    return self.home
+        and x == self.home.x
+        and y == self.home.y
+        and z == self.home.z
+end
+
+--- Attempt to place the currently selected block in `dirName` (`"up"`, `"down"`, `"forward"`),
+-- never placing a block inside the saved Home coordinates.
+function TurtleMiner:tryPlaceInDirection(dirName)
+    if not turtle then
+        return false
+    end
+    if dirName == "up" then
+        if self:isHomeCoord(self.pos.x, self.pos.y + 1, self.pos.z) then
+            return false
+        end
+        if type(turtle.placeUp) == "function" then
+            return turtle.placeUp() == true
+        end
+    elseif dirName == "down" then
+        if self:isHomeCoord(self.pos.x, self.pos.y - 1, self.pos.z) then
+            return false
+        end
+        if type(turtle.placeDown) == "function" then
+            return turtle.placeDown() == true
+        end
+    elseif dirName == "forward" then
+        local vec = DIR_VECTORS[self.pos.dir] or { x = 0, z = -1 }
+        if self:isHomeCoord(self.pos.x + vec.x, self.pos.y, self.pos.z + vec.z) then
+            return false
+        end
+        if type(turtle.place) == "function" then
+            return turtle.place() == true
+        end
+    end
+    return false
+end
+
+--- Place a waste block in the turtle's path behind/around it after moving or digging an ore.
+-- @tparam[opt] string lastMove `"down"`, `"up"`, `"forward"`, `"target_up"`, `"target_down"`, `"target_forward"`
+function TurtleMiner:placeWasteInPath(lastMove)
+    if not turtle then
+        return false
+    end
+    local slot = self:findWasteSlot()
+    if not slot then
+        return false
+    end
+
+    local dirs
+    if lastMove == "down" then
+        -- Moved down: the space we just vacated is directly UP
+        dirs = { "up", "down" }
+    elseif lastMove == "up" then
+        -- Moved up: the space we just vacated is directly DOWN
+        dirs = { "down", "up" }
+    elseif lastMove == "forward" then
+        -- Moved forward: place below or above the path (never forward into our walking direction)
+        dirs = { "down", "up" }
+    elseif lastMove == "target_up" then
+        dirs = { "up", "down", "forward" }
+    elseif lastMove == "target_down" then
+        dirs = { "down", "up", "forward" }
+    elseif lastMove == "target_forward" then
+        dirs = { "forward", "down", "up" }
+    else
+        dirs = { "down", "up", "forward" }
+    end
+
+    local prevSlot = turtle.getSelectedSlot and turtle.getSelectedSlot() or 1
+    if turtle.select then
+        turtle.select(slot)
+    end
+
+    local placed = false
+    for _, d in ipairs(dirs) do
+        if self:tryPlaceInDirection(d) then
+            placed = true
+            break
+        end
+    end
+
+    if turtle.select then
+        turtle.select(prevSlot)
+    end
+    return placed
+end
+
+--- Place non-ore waste blocks (such as dirt, cobblestone, stone, deepslate) into open spaces around the turtle's path.
+function TurtleMiner:placeWasteBlocks()
+    if not turtle or not turtle.getItemDetail then
+        return 0
+    end
+    local hasPlaceApi = type(turtle.placeDown) == "function"
+        or type(turtle.placeUp) == "function"
+        or type(turtle.place) == "function"
+    if not hasPlaceApi then
+        return 0
+    end
+
+    local placedSlots = 0
+    local prevSlot = turtle.getSelectedSlot and turtle.getSelectedSlot() or 1
+    for slot = 1, 16 do
+        local count = turtle.getItemCount and turtle.getItemCount(slot) or 0
+        if count > 0 then
+            local detail = turtle.getItemDetail(slot, true)
+            if detail and self:isWasteItem(detail) then
+                if turtle.select then
+                    turtle.select(slot)
+                end
+                local placedAny = false
+                if self:tryPlaceInDirection("down") then
+                    placedAny = true
+                end
+                if (turtle.getItemCount and turtle.getItemCount(slot) or 0) > 0 and self:tryPlaceInDirection("up") then
+                    placedAny = true
+                end
+                if (turtle.getItemCount and turtle.getItemCount(slot) or 0) > 0 and self:tryPlaceInDirection("forward") then
+                    placedAny = true
+                end
+                if placedAny then
+                    placedSlots = placedSlots + 1
+                end
+            end
+        end
+    end
+    if turtle.select then
+        turtle.select(prevSlot)
+    end
+    return placedSlots
+end
+
+--- Ensure the inventory is not clogged with unplaced waste blocks when all 16 slots are full:
+-- First places as many waste blocks as possible in the turtle's path (`placeDown`/`placeUp`/`place`);
+-- if all 16 slots remain occupied and adjacent spaces are solid walls, keeps 1 waste slot for path
+-- placement and clears any excess waste slots so ore slots are not blocked.
+function TurtleMiner:clearWasteIfFull()
+    if not self:isInventoryFull() then
+        return
+    end
+    self:placeWasteBlocks()
+    if not self:isInventoryFull() then
+        return
+    end
+    if not turtle or not turtle.getItemDetail or not turtle.drop then
+        return
+    end
+    local keptWasteSlot = false
+    local prevSlot = turtle.getSelectedSlot and turtle.getSelectedSlot() or 1
+    for slot = 1, 16 do
+        local count = turtle.getItemCount and turtle.getItemCount(slot) or 0
+        if count > 0 then
+            local detail = turtle.getItemDetail(slot, true)
+            if detail and self:isWasteItem(detail) then
+                if not keptWasteSlot then
+                    keptWasteSlot = true
+                else
+                    if turtle.select then turtle.select(slot) end
+                    if turtle.dropDown then turtle.dropDown() end
+                    if (turtle.getItemCount(slot) or 0) > 0 and turtle.drop then turtle.drop() end
+                end
+            end
+        end
+    end
+    if turtle.select then
+        turtle.select(prevSlot)
+    end
+end
+
+-- Alias so existing callers invoke waste placement
+TurtleMiner.dropWasteBlocks = TurtleMiner.placeWasteBlocks
 
 --- Check if all 16 turtle inventory slots are occupied.
 function TurtleMiner:isInventoryFull()
@@ -378,7 +716,7 @@ function TurtleMiner:getInventoryStats()
         if count > 0 then
             usedSlots = usedSlots + 1
             local detail = turtle.getItemDetail and turtle.getItemDetail(slot, true) or nil
-            if detail and GeoScanner.isOreItem(detail, self.minedItems) then
+            if detail and GeoScanner.isOreItem(detail, self.minedItems) and not self:isFuelOrToolItem(detail) then
                 oreCount = oreCount + (detail.count or count)
             end
         end
@@ -394,7 +732,7 @@ function TurtleMiner:hasOresInInventory()
     for slot = 1, 16 do
         if turtle.getItemCount(slot) > 0 then
             local detail = turtle.getItemDetail and turtle.getItemDetail(slot, true) or nil
-            if detail and GeoScanner.isOreItem(detail, self.minedItems) then
+            if detail and GeoScanner.isOreItem(detail, self.minedItems) and not self:isFuelOrToolItem(detail) then
                 return true
             end
         end
@@ -402,46 +740,85 @@ function TurtleMiner:hasOresInInventory()
     return false
 end
 
---- Discard (drop) all non-ore blocks (such as dirt, cobblestone, stone, deepslate, gravel, etc.).
-function TurtleMiner:dropWasteBlocks()
-    if not turtle or not turtle.getItemDetail or not turtle.drop then
-        return 0
+--- Charge the turtle using FE/RF energy items in the inventory via End Automata `chargeTurtle()`.
+function TurtleMiner:chargeWithEnergy(minRequired)
+    if not turtle or not turtle.getFuelLevel then
+        return true
     end
-    local droppedSlots = 0
+    local level = turtle.getFuelLevel()
+    if level == "unlimited" then
+        return true
+    end
+    minRequired = minRequired or 20
+    if level >= minRequired then
+        return true
+    end
+
+    local automata = self:ensureAutomata()
+    if not automata or type(automata.chargeTurtle) ~= "function" then
+        return false
+    end
+
     local prevSlot = turtle.getSelectedSlot and turtle.getSelectedSlot() or 1
     for slot = 1, 16 do
         local count = turtle.getItemCount and turtle.getItemCount(slot) or 0
         if count > 0 then
-            local detail = turtle.getItemDetail(slot, true)
-            if detail and detail.name then
-                local isOre = GeoScanner.isOreItem(detail, self.minedItems)
-                local isFuelOrTool = self:isFuelOrToolItem(detail)
-                if not isOre and not isFuelOrTool then
+            local detail = turtle.getItemDetail and turtle.getItemDetail(slot, true) or nil
+            local isKnownWaste = detail and detail.name and GeoScanner.isWasteName(detail.name)
+            local isKnownOre = detail and GeoScanner.isOreItem(detail, self.minedItems) and not GeoScanner.isEnergyItemName(detail.name)
+            if not isKnownWaste and not isKnownOre then
+                if turtle.select then
                     turtle.select(slot)
-                    local dropped = false
-                    if turtle.dropDown then
-                        dropped = turtle.dropDown()
+                end
+                for _ = 1, 8 do
+                    if type(automata.getChargeCooldown) == "function" then
+                        local cdOk, cd = pcall(automata.getChargeCooldown)
+                        if cdOk and type(cd) == "number" and cd > 0 then
+                            sleepSeconds(math.min(cd / 1000, 1.0))
+                        end
                     end
-                    if not dropped and turtle.drop then
-                        dropped = turtle.drop()
+                    local beforeFuel = turtle.getFuelLevel()
+                    local needed = math.max(1, minRequired - beforeFuel)
+                    local ok, res, extra = pcall(automata.chargeTurtle, needed)
+                    local afterFuel = turtle.getFuelLevel()
+                    local charged = ok and (
+                        res == true
+                        or (type(res) == "number" and res > 0)
+                        or (type(extra) == "number" and extra > 0)
+                        or (afterFuel > beforeFuel)
+                    )
+                    if charged then
+                        if detail and detail.name then
+                            self.energyItems[detail.name:lower()] = true
+                        end
+                        if afterFuel >= minRequired or afterFuel <= beforeFuel then
+                            break
+                        end
+                    else
+                        local errMsg = tostring(extra or res or "")
+                        if errMsg:lower():find("cooldown", 1, true) then
+                            sleepSeconds(0.5)
+                        else
+                            break
+                        end
                     end
-                    if not dropped and turtle.dropUp then
-                        dropped = turtle.dropUp()
-                    end
-                    if dropped then
-                        droppedSlots = droppedSlots + 1
-                    end
+                end
+                if turtle.getFuelLevel() >= minRequired then
+                    break
                 end
             end
         end
     end
+
     if turtle.select then
         turtle.select(prevSlot)
     end
-    return droppedSlots
+    return turtle.getFuelLevel() >= minRequired
 end
 
---- Refuel automatically from inventory if fuel is low.
+--- Ensure the turtle has at least `minRequired` fuel:
+-- 1) Charges from energy items via `automata.chargeTurtle()`
+-- 2) Falls back to `turtle.refuel()` using burnable fuel in the inventory
 function TurtleMiner:ensureFuel(minRequired)
     if not turtle or not turtle.getFuelLevel then
         return true
@@ -454,55 +831,101 @@ function TurtleMiner:ensureFuel(minRequired)
     if level >= minRequired then
         return true
     end
-    if not turtle.refuel then
-        return level > 0
+
+    -- 1. Try charging with FE/energy via End Automata `chargeTurtle()`
+    if self:chargeWithEnergy(minRequired) then
+        return true
     end
-    local prevSlot = turtle.getSelectedSlot and turtle.getSelectedSlot() or 1
-    -- Pass 1: refuel from non-ore fuels and coal
-    for slot = 1, 16 do
-        if turtle.getItemCount(slot) > 0 then
-            local detail = turtle.getItemDetail and turtle.getItemDetail(slot, true) or nil
-            local isCoal = detail and detail.name and detail.name:lower():find("coal", 1, true)
-            if not detail or isCoal or not GeoScanner.isOreItem(detail, self.minedItems) then
-                turtle.select(slot)
-                turtle.refuel(16)
-                if turtle.getFuelLevel() >= minRequired then
-                    break
-                end
-            end
-        end
-    end
-    -- Pass 2: if still at 0 fuel, try refueling from ANY slot so the turtle is not stranded
-    if turtle.getFuelLevel() <= 0 then
+
+    -- 2. Fallback to standard burnable fuel via `turtle.refuel()`
+    if type(turtle.refuel) == "function" then
+        local prevSlot = turtle.getSelectedSlot and turtle.getSelectedSlot() or 1
         for slot = 1, 16 do
-            if turtle.getItemCount(slot) > 0 then
-                turtle.select(slot)
-                turtle.refuel(1)
-                if turtle.getFuelLevel() > 0 then
-                    break
+            if turtle.getItemCount and turtle.getItemCount(slot) > 0 then
+                local detail = turtle.getItemDetail and turtle.getItemDetail(slot, true) or nil
+                local isCoal = detail and detail.name and detail.name:lower():find("coal", 1, true)
+                if not detail or isCoal or not GeoScanner.isOreItem(detail, self.minedItems) then
+                    if turtle.select then turtle.select(slot) end
+                    turtle.refuel(16)
+                    if turtle.getFuelLevel() >= minRequired then
+                        break
+                    end
                 end
             end
         end
+        if turtle.getFuelLevel() <= 0 then
+            for slot = 1, 16 do
+                if turtle.getItemCount and turtle.getItemCount(slot) > 0 then
+                    if turtle.select then turtle.select(slot) end
+                    turtle.refuel(1)
+                    if turtle.getFuelLevel() > 0 then
+                        break
+                    end
+                end
+            end
+        end
+        if turtle.select then
+            turtle.select(prevSlot)
+        end
     end
-    if turtle.select then
-        turtle.select(prevSlot)
+
+    local finalFuel = turtle.getFuelLevel()
+    if minRequired > 1 then
+        return finalFuel >= minRequired
     end
-    return turtle.getFuelLevel() > 0
+    return finalFuel > 0
 end
 
---- If the turtle has a pickaxe in its inventory but not equipped, try equipping it on the non-scanner side.
+--- Select the pickaxe / mining tool in the turtle's inventory for `automata.digBlock()`.
+function TurtleMiner:selectToolSlot()
+    if not turtle or not turtle.getItemDetail then
+        return nil
+    end
+    for slot = 1, 16 do
+        local detail = turtle.getItemDetail(slot)
+        if detail and detail.name then
+            local name = detail.name:lower()
+            if name:find("pickaxe", 1, true)
+                or name:find("paxel", 1, true)
+                or name:find("drill", 1, true)
+            then
+                if turtle.select then
+                    turtle.select(slot)
+                end
+                return slot
+            end
+        end
+    end
+    return nil
+end
+
+--- If the turtle has a pickaxe in its inventory, equip it on the non-Automata side.
 function TurtleMiner:tryEquipPickaxe()
     if not turtle or not turtle.getItemDetail then
         return false
     end
+    local _, automataSide = self:ensureAutomata()
+    local scannerSide = self.scanner and self.scanner.name or ""
     local prevSlot = turtle.getSelectedSlot and turtle.getSelectedSlot() or 1
+
     for slot = 1, 16 do
         local detail = turtle.getItemDetail(slot)
         if detail and detail.name and detail.name:lower():find("pickaxe", 1, true) then
-            turtle.select(slot)
-            -- Equip on whichever side does NOT have the Geo Scanner
-            local scannerSide = self.scanner and self.scanner.name or ""
-            if scannerSide == "left" and turtle.equipRight then
+            if turtle.select then turtle.select(slot) end
+            -- Never overwrite the End Automata side so its saved warp points are preserved
+            if automataSide == "left" and turtle.equipRight then
+                if turtle.equipRight() then
+                    self.scanner = nil
+                    if turtle.select then turtle.select(prevSlot) end
+                    return true
+                end
+            elseif automataSide == "right" and turtle.equipLeft then
+                if turtle.equipLeft() then
+                    self.scanner = nil
+                    if turtle.select then turtle.select(prevSlot) end
+                    return true
+                end
+            elseif scannerSide == "left" and turtle.equipRight then
                 if turtle.equipRight() then
                     if turtle.select then turtle.select(prevSlot) end
                     return true
@@ -512,11 +935,13 @@ function TurtleMiner:tryEquipPickaxe()
                     if turtle.select then turtle.select(prevSlot) end
                     return true
                 end
-            else
-                if turtle.equipLeft and turtle.equipLeft() then
-                    -- Verify we didn't unequip the Geo Scanner into the slot
+            elseif turtle.equipLeft then
+                if turtle.equipLeft() then
                     local swapped = turtle.getItemDetail(slot)
-                    if swapped and swapped.name and swapped.name:lower():find("geo_scanner", 1, true) then
+                    if swapped and swapped.name and (
+                        swapped.name:lower():find("geo_scanner", 1, true)
+                        or swapped.name:lower():find("automata", 1, true)
+                    ) then
                         turtle.equipLeft()
                         if turtle.equipRight then turtle.equipRight() end
                     end
@@ -530,6 +955,122 @@ function TurtleMiner:tryEquipPickaxe()
         turtle.select(prevSlot)
     end
     return false
+end
+
+--- Dig a block in `dirName` (`"forward"`, `"up"`, `"down"`) using the End Automata `digBlock()` API.
+function TurtleMiner:digWithAutomata(dirName)
+    local automata = self:ensureAutomata()
+    if not automata or type(automata.digBlock) ~= "function" then
+        return false, "no_automata_dig"
+    end
+
+    local prevSlot = (turtle and turtle.getSelectedSlot) and turtle.getSelectedSlot() or 1
+    self:selectToolSlot()
+
+    local rotOpts = { yaw = 0, pitch = 0 }
+    local detectFn = turtle and turtle.detect or nil
+    local suckFn = turtle and turtle.suck or nil
+    if dirName == "up" then
+        rotOpts = { yaw = 0, pitch = -90 }
+        detectFn = turtle and turtle.detectUp or nil
+        suckFn = turtle and turtle.suckUp or nil
+    elseif dirName == "down" then
+        rotOpts = { yaw = 0, pitch = 90 }
+        detectFn = turtle and turtle.detectDown or nil
+        suckFn = turtle and turtle.suckDown or nil
+    end
+
+    local lastErr = nil
+    local dugSuccess = false
+    for _ = 1, 12 do
+        if type(automata.getDigCooldown) == "function" then
+            local cdOk, cd = pcall(automata.getDigCooldown)
+            if cdOk and type(cd) == "number" and cd > 0 then
+                sleepSeconds(math.min(cd / 1000, 1.0))
+            end
+        end
+        local ok, res, err = pcall(automata.digBlock, rotOpts)
+        if ok and res == true then
+            dugSuccess = true
+            if type(automata.collectItems) == "function" then
+                pcall(automata.collectItems)
+            end
+            if type(suckFn) == "function" then
+                pcall(suckFn)
+            end
+            if not (type(detectFn) == "function" and detectFn()) then
+                break
+            end
+            sleepSeconds(0.1)
+        else
+            lastErr = tostring(err or res or "digBlock failed")
+            if lastErr:lower():find("cooldown", 1, true) then
+                sleepSeconds(0.5)
+            else
+                break
+            end
+        end
+    end
+
+    if turtle and turtle.select then
+        turtle.select(prevSlot)
+    end
+    return dugSuccess, lastErr
+end
+
+--- Break a block in `dirName` (`"forward"`, `"up"`, `"down"`) using `turtle.dig*` or `automata.digBlock`.
+function TurtleMiner:tryDigDirection(dirName, isTargetOre)
+    local digFn = turtle and turtle.dig or nil
+    local detectFn = turtle and turtle.detect or nil
+    if dirName == "up" then
+        digFn = turtle and turtle.digUp or nil
+        detectFn = turtle and turtle.detectUp or nil
+    elseif dirName == "down" then
+        digFn = turtle and turtle.digDown or nil
+        detectFn = turtle and turtle.detectDown or nil
+    end
+
+    local before = isTargetOre and self:snapshotInventoryCounts() or nil
+    local ok, err = false, "no_dig_fn"
+
+    if type(digFn) == "function" then
+        ok, err = digFn()
+    end
+
+    -- Use End Automata `digBlock()` if `turtle.dig*` is not equipped with a side tool
+    if not ok then
+        local autoOk, autoErr = self:digWithAutomata(dirName)
+        if autoOk then
+            ok, err = true, nil
+        elseif autoErr and autoErr ~= "no_automata_dig" then
+            err = autoErr
+        end
+    end
+
+    -- Fallback: equip pickaxe on non-Automata side and retry `turtle.dig*`
+    if not ok and type(digFn) == "function" then
+        if self:tryEquipPickaxe() then
+            ok, err = digFn()
+        end
+    end
+
+    if ok or (type(detectFn) == "function" and not detectFn()) then
+        if isTargetOre and before then
+            self:recordNewlyMinedItems(before)
+        end
+        return true, nil
+    end
+
+    return false, err
+end
+
+function TurtleMiner:tryDigWithToolCheck(digFn, isTargetOre)
+    if digFn == (turtle and turtle.digUp) then
+        return self:tryDigDirection("up", isTargetOre)
+    elseif digFn == (turtle and turtle.digDown) then
+        return self:tryDigDirection("down", isTargetOre)
+    end
+    return self:tryDigDirection("forward", isTargetOre)
 end
 
 --------------------------------------------------------------------------------
@@ -581,26 +1122,6 @@ function TurtleMiner:inspectDirection(inspectFn)
     return false, nil
 end
 
-function TurtleMiner:tryDigWithToolCheck(digFn, isTargetOre)
-    if not turtle or type(digFn) ~= "function" then
-        return false, "no_dig_fn"
-    end
-    local before = isTargetOre and self:snapshotInventoryCounts() or nil
-    local ok, err = digFn()
-    if not ok and type(err) == "string" and err:lower():find("no tool", 1, true) then
-        if self:tryEquipPickaxe() then
-            ok, err = digFn()
-        end
-    end
-    if ok then
-        if isTargetOre and before then
-            self:recordNewlyMinedItems(before)
-        end
-        self:dropWasteBlocks()
-    end
-    return ok, err
-end
-
 function TurtleMiner:stepForward(digIfBlocked)
     if not turtle then return false end
     local vec = DIR_VECTORS[self.pos.dir] or { x = 0, z = -1 }
@@ -610,22 +1131,21 @@ function TurtleMiner:stepForward(digIfBlocked)
     end
 
     if not self:ensureFuel(1) then
-        self.lastMoveError = "OUT OF FUEL (0)! Add coal/fuel to turtle"
+        self.lastMoveError = "OUT OF FUEL (0)! Add energy cell or fuel to turtle"
         return false, "no_fuel"
     end
 
-    -- If a block is detected in front before moving, inspect it and break it (unless protected)
     if turtle.detect and turtle.detect() then
         local hasBlock, data = self:inspectDirection(turtle.inspect)
         if hasBlock and self:isProtectedBlock(data.name) then
             self:markBlocked(nx, ny, nz)
             return false, "protected"
         end
-        if digIfBlocked and turtle.dig then
-            local digOk, digErr = self:tryDigWithToolCheck(turtle.dig)
+        if digIfBlocked then
+            local digOk, digErr = self:tryDigDirection("forward")
             if not digOk and turtle.detect() then
-                if type(digErr) == "string" and digErr:lower():find("no tool", 1, true) then
-                    self.lastMoveError = "No pickaxe equipped on turtle!"
+                if type(digErr) == "string" and (digErr:lower():find("no tool", 1, true) or digErr:lower():find("without tool", 1, true)) then
+                    self.lastMoveError = "No pickaxe available on turtle!"
                     return false, "no_tool"
                 end
                 local blkName = hasBlock and GeoScanner.shortName(data.name) or "block"
@@ -644,7 +1164,7 @@ function TurtleMiner:stepForward(digIfBlocked)
         attempts = attempts + 1
         if type(moveErr) == "string" and moveErr:lower():find("fuel", 1, true) then
             if not self:ensureFuel(1) then
-                self.lastMoveError = "OUT OF FUEL (0)! Add coal/fuel to turtle"
+                self.lastMoveError = "OUT OF FUEL (0)! Add energy cell or fuel to turtle"
                 return false, "no_fuel"
             end
         end
@@ -653,11 +1173,11 @@ function TurtleMiner:stepForward(digIfBlocked)
             self:markBlocked(nx, ny, nz)
             return false, "protected"
         end
-        if digIfBlocked and turtle.dig then
-            local digOk, digErr = self:tryDigWithToolCheck(turtle.dig)
+        if digIfBlocked then
+            local digOk, digErr = self:tryDigDirection("forward")
             if not digOk and turtle.detect and turtle.detect() then
-                if type(digErr) == "string" and digErr:lower():find("no tool", 1, true) then
-                    self.lastMoveError = "No pickaxe equipped on turtle!"
+                if type(digErr) == "string" and (digErr:lower():find("no tool", 1, true) or digErr:lower():find("without tool", 1, true)) then
+                    self.lastMoveError = "No pickaxe available on turtle!"
                     return false, "no_tool"
                 end
                 local blkName = hasBlock and GeoScanner.shortName(data.name) or "block"
@@ -677,6 +1197,7 @@ function TurtleMiner:stepForward(digIfBlocked)
     self.pos.x = nx
     self.pos.z = nz
     self:savePos()
+    self:placeWasteInPath("forward")
     return true
 end
 
@@ -688,7 +1209,7 @@ function TurtleMiner:stepUp(digIfBlocked)
     end
 
     if not self:ensureFuel(1) then
-        self.lastMoveError = "OUT OF FUEL (0)! Add coal/fuel to turtle"
+        self.lastMoveError = "OUT OF FUEL (0)! Add energy cell or fuel to turtle"
         return false, "no_fuel"
     end
 
@@ -698,11 +1219,11 @@ function TurtleMiner:stepUp(digIfBlocked)
             self:markBlocked(nx, ny, nz)
             return false, "protected"
         end
-        if digIfBlocked and turtle.digUp then
-            local digOk, digErr = self:tryDigWithToolCheck(turtle.digUp)
+        if digIfBlocked then
+            local digOk, digErr = self:tryDigDirection("up")
             if not digOk and turtle.detectUp() then
-                if type(digErr) == "string" and digErr:lower():find("no tool", 1, true) then
-                    self.lastMoveError = "No pickaxe equipped on turtle!"
+                if type(digErr) == "string" and (digErr:lower():find("no tool", 1, true) or digErr:lower():find("without tool", 1, true)) then
+                    self.lastMoveError = "No pickaxe available on turtle!"
                     return false, "no_tool"
                 end
                 local blkName = hasBlock and GeoScanner.shortName(data.name) or "block"
@@ -721,7 +1242,7 @@ function TurtleMiner:stepUp(digIfBlocked)
         attempts = attempts + 1
         if type(moveErr) == "string" and moveErr:lower():find("fuel", 1, true) then
             if not self:ensureFuel(1) then
-                self.lastMoveError = "OUT OF FUEL (0)! Add coal/fuel to turtle"
+                self.lastMoveError = "OUT OF FUEL (0)! Add energy cell or fuel to turtle"
                 return false, "no_fuel"
             end
         end
@@ -730,11 +1251,11 @@ function TurtleMiner:stepUp(digIfBlocked)
             self:markBlocked(nx, ny, nz)
             return false, "protected"
         end
-        if digIfBlocked and turtle.digUp then
-            local digOk, digErr = self:tryDigWithToolCheck(turtle.digUp)
+        if digIfBlocked then
+            local digOk, digErr = self:tryDigDirection("up")
             if not digOk and turtle.detectUp and turtle.detectUp() then
-                if type(digErr) == "string" and digErr:lower():find("no tool", 1, true) then
-                    self.lastMoveError = "No pickaxe equipped on turtle!"
+                if type(digErr) == "string" and (digErr:lower():find("no tool", 1, true) or digErr:lower():find("without tool", 1, true)) then
+                    self.lastMoveError = "No pickaxe available on turtle!"
                     return false, "no_tool"
                 end
                 local blkName = hasBlock and GeoScanner.shortName(data.name) or "block"
@@ -753,6 +1274,7 @@ function TurtleMiner:stepUp(digIfBlocked)
     end
     self.pos.y = ny
     self:savePos()
+    self:placeWasteInPath("up")
     return true
 end
 
@@ -764,7 +1286,7 @@ function TurtleMiner:stepDown(digIfBlocked)
     end
 
     if not self:ensureFuel(1) then
-        self.lastMoveError = "OUT OF FUEL (0)! Add coal/fuel to turtle"
+        self.lastMoveError = "OUT OF FUEL (0)! Add energy cell or fuel to turtle"
         return false, "no_fuel"
     end
 
@@ -774,11 +1296,11 @@ function TurtleMiner:stepDown(digIfBlocked)
             self:markBlocked(nx, ny, nz)
             return false, "protected"
         end
-        if digIfBlocked and turtle.digDown then
-            local digOk, digErr = self:tryDigWithToolCheck(turtle.digDown)
+        if digIfBlocked then
+            local digOk, digErr = self:tryDigDirection("down")
             if not digOk and turtle.detectDown() then
-                if type(digErr) == "string" and digErr:lower():find("no tool", 1, true) then
-                    self.lastMoveError = "No pickaxe equipped on turtle!"
+                if type(digErr) == "string" and (digErr:lower():find("no tool", 1, true) or digErr:lower():find("without tool", 1, true)) then
+                    self.lastMoveError = "No pickaxe available on turtle!"
                     return false, "no_tool"
                 end
                 local blkName = hasBlock and GeoScanner.shortName(data.name) or "block"
@@ -797,7 +1319,7 @@ function TurtleMiner:stepDown(digIfBlocked)
         attempts = attempts + 1
         if type(moveErr) == "string" and moveErr:lower():find("fuel", 1, true) then
             if not self:ensureFuel(1) then
-                self.lastMoveError = "OUT OF FUEL (0)! Add coal/fuel to turtle"
+                self.lastMoveError = "OUT OF FUEL (0)! Add energy cell or fuel to turtle"
                 return false, "no_fuel"
             end
         end
@@ -806,11 +1328,11 @@ function TurtleMiner:stepDown(digIfBlocked)
             self:markBlocked(nx, ny, nz)
             return false, "protected"
         end
-        if digIfBlocked and turtle.digDown then
-            local digOk, digErr = self:tryDigWithToolCheck(turtle.digDown)
+        if digIfBlocked then
+            local digOk, digErr = self:tryDigDirection("down")
             if not digOk and turtle.detectDown and turtle.detectDown() then
-                if type(digErr) == "string" and digErr:lower():find("no tool", 1, true) then
-                    self.lastMoveError = "No pickaxe equipped on turtle!"
+                if type(digErr) == "string" and (digErr:lower():find("no tool", 1, true) or digErr:lower():find("without tool", 1, true)) then
+                    self.lastMoveError = "No pickaxe available on turtle!"
                     return false, "no_tool"
                 end
                 local blkName = hasBlock and GeoScanner.shortName(data.name) or "block"
@@ -829,6 +1351,7 @@ function TurtleMiner:stepDown(digIfBlocked)
     end
     self.pos.y = ny
     self:savePos()
+    self:placeWasteInPath("down")
     return true
 end
 
@@ -873,7 +1396,6 @@ function TurtleMiner:findPath(tx, ty, tz, stopAdjacent)
     while #openList > 0 and iterations < maxIterations do
         iterations = iterations + 1
 
-        -- Pop node with lowest f score
         local bestIdx = 1
         for i = 2, #openList do
             if openList[i].f < openList[bestIdx].f
@@ -962,14 +1484,8 @@ end
 
 --- Navigate to target coordinates `(tx, ty, tz)`.
 -- Prefers moving down (-Y) before moving horizontally (X/Z) in the direction of the ore,
--- breaks blocks in the way (except `allthemodium:teleport_pad`), and finds an alternative
--- path if `allthemodium:teleport_pad` or another unbreakable block is encountered.
--- @tparam number tx Target X
--- @tparam number ty Target Y
--- @tparam number tz Target Z
--- @tparam boolean stopAdjacent If true, stops 1 block adjacent to the target and digs it
--- @tparam boolean respectStop If true, aborts movement immediately if `self.running` becomes false
--- @treturn boolean success
+-- breaks blocks in the way (except `allthemodium:teleport_pad`), places waste blocks in its path,
+-- and finds an alternative path if `allthemodium:teleport_pad` or another unbreakable block is encountered.
 function TurtleMiner:moveTo(tx, ty, tz, stopAdjacent, respectStop)
     if self:isBlocked(tx, ty, tz) then
         return false
@@ -998,26 +1514,24 @@ function TurtleMiner:moveTo(tx, ty, tz, stopAdjacent, respectStop)
                     self:markBlocked(tx, ty, tz)
                     return false
                 end
-                if turtle.digUp then
-                    local digOk, digErr = self:tryDigWithToolCheck(turtle.digUp, true)
-                    if not digOk and turtle.detectUp and turtle.detectUp() then
-                        self.lastMoveError = tostring(digErr or "Cannot dig target above")
-                        return false
-                    end
+                local digOk, digErr = self:tryDigDirection("up", true)
+                if not digOk and turtle.detectUp and turtle.detectUp() then
+                    self.lastMoveError = tostring(digErr or "Cannot dig target above")
+                    return false
                 end
+                self:placeWasteInPath("target_up")
             elseif dy == -1 then
                 local hasBlock, data = self:inspectDirection(turtle.inspectDown)
                 if hasBlock and self:isProtectedBlock(data.name) then
                     self:markBlocked(tx, ty, tz)
                     return false
                 end
-                if turtle.digDown then
-                    local digOk, digErr = self:tryDigWithToolCheck(turtle.digDown, true)
-                    if not digOk and turtle.detectDown and turtle.detectDown() then
-                        self.lastMoveError = tostring(digErr or "Cannot dig target below")
-                        return false
-                    end
+                local digOk, digErr = self:tryDigDirection("down", true)
+                if not digOk and turtle.detectDown and turtle.detectDown() then
+                    self.lastMoveError = tostring(digErr or "Cannot dig target below")
+                    return false
                 end
+                self:placeWasteInPath("target_down")
             elseif dx == 1 then
                 self:turnTo(1)
                 local hasBlock, data = self:inspectDirection(turtle.inspect)
@@ -1025,13 +1539,12 @@ function TurtleMiner:moveTo(tx, ty, tz, stopAdjacent, respectStop)
                     self:markBlocked(tx, ty, tz)
                     return false
                 end
-                if turtle.dig then
-                    local digOk, digErr = self:tryDigWithToolCheck(turtle.dig, true)
-                    if not digOk and turtle.detect and turtle.detect() then
-                        self.lastMoveError = tostring(digErr or "Cannot dig target")
-                        return false
-                    end
+                local digOk, digErr = self:tryDigDirection("forward", true)
+                if not digOk and turtle.detect and turtle.detect() then
+                    self.lastMoveError = tostring(digErr or "Cannot dig target")
+                    return false
                 end
+                self:placeWasteInPath("target_forward")
             elseif dx == -1 then
                 self:turnTo(3)
                 local hasBlock, data = self:inspectDirection(turtle.inspect)
@@ -1039,13 +1552,12 @@ function TurtleMiner:moveTo(tx, ty, tz, stopAdjacent, respectStop)
                     self:markBlocked(tx, ty, tz)
                     return false
                 end
-                if turtle.dig then
-                    local digOk, digErr = self:tryDigWithToolCheck(turtle.dig, true)
-                    if not digOk and turtle.detect and turtle.detect() then
-                        self.lastMoveError = tostring(digErr or "Cannot dig target")
-                        return false
-                    end
+                local digOk, digErr = self:tryDigDirection("forward", true)
+                if not digOk and turtle.detect and turtle.detect() then
+                    self.lastMoveError = tostring(digErr or "Cannot dig target")
+                    return false
                 end
+                self:placeWasteInPath("target_forward")
             elseif dz == 1 then
                 self:turnTo(2)
                 local hasBlock, data = self:inspectDirection(turtle.inspect)
@@ -1053,13 +1565,12 @@ function TurtleMiner:moveTo(tx, ty, tz, stopAdjacent, respectStop)
                     self:markBlocked(tx, ty, tz)
                     return false
                 end
-                if turtle.dig then
-                    local digOk, digErr = self:tryDigWithToolCheck(turtle.dig, true)
-                    if not digOk and turtle.detect and turtle.detect() then
-                        self.lastMoveError = tostring(digErr or "Cannot dig target")
-                        return false
-                    end
+                local digOk, digErr = self:tryDigDirection("forward", true)
+                if not digOk and turtle.detect and turtle.detect() then
+                    self.lastMoveError = tostring(digErr or "Cannot dig target")
+                    return false
                 end
+                self:placeWasteInPath("target_forward")
             elseif dz == -1 then
                 self:turnTo(0)
                 local hasBlock, data = self:inspectDirection(turtle.inspect)
@@ -1067,13 +1578,12 @@ function TurtleMiner:moveTo(tx, ty, tz, stopAdjacent, respectStop)
                     self:markBlocked(tx, ty, tz)
                     return false
                 end
-                if turtle.dig then
-                    local digOk, digErr = self:tryDigWithToolCheck(turtle.dig, true)
-                    if not digOk and turtle.detect and turtle.detect() then
-                        self.lastMoveError = tostring(digErr or "Cannot dig target")
-                        return false
-                    end
+                local digOk, digErr = self:tryDigDirection("forward", true)
+                if not digOk and turtle.detect and turtle.detect() then
+                    self.lastMoveError = tostring(digErr or "Cannot dig target")
+                    return false
                 end
+                self:placeWasteInPath("target_forward")
             end
             return true
         end
@@ -1137,7 +1647,6 @@ function TurtleMiner:moveTo(tx, ty, tz, stopAdjacent, respectStop)
                     if isFatalMoveReason(nReason) then
                         return false
                     end
-                    -- Hit a newly discovered protected block along the detour; break inner loop to re-plan
                     break
                 end
                 stepOk = true
@@ -1149,20 +1658,90 @@ function TurtleMiner:moveTo(tx, ty, tz, stopAdjacent, respectStop)
     end
 end
 
---- Return the turtle to its saved Home coordinates and face its home direction.
+--------------------------------------------------------------------------------
+-- Teleport to Home (End Automata) + Dig-to-Home Fallback
+--------------------------------------------------------------------------------
+
+--- Return the turtle to its saved Home coordinates and ensure it is aligned with Home's direction.
+-- Primary: Teleports to `"home"` using the End Automata (`warpToPoint("home")`) and aligns with `home.dir`.
+-- Fallback: Uses the dig-to-home pathfinding system (`moveTo`) when the End Automata is missing/broken
+--           or when `estimateWarpCost("home")` is greater than the fuel we have.
 function TurtleMiner:returnToHome()
     self.phase = "RETURNING HOME"
-    self.lastAction = ("Returning to Home (%d, %d, %d)..."):format(
+    if self.pos.y < self.home.y then
+        self.lastChunkMiningY = math.min(self.lastChunkMiningY or self.pos.y, self.pos.y)
+    end
+
+    if self:isAtHome() then
+        self:turnTo(self.home.dir or 0)
+        self:saveHomeWarpPoint()
+        self.lastAction = "At Home and aligned."
+        return true, "at_home"
+    end
+
+    -- 1. Try End Automata teleport (`warpToPoint("home")`) if intact and fuel is sufficient
+    local automata = self:ensureAutomata()
+    if automata and type(automata.warpToPoint) == "function" and self:hasHomeWarpPoint(automata) then
+        local warpCost = 1
+        local pointValid = true
+        if type(automata.estimateWarpCost) == "function" then
+            local okCost, estCost = pcall(automata.estimateWarpCost, HOME_WARP_NAME)
+            if okCost and type(estCost) == "number" then
+                warpCost = estCost
+            elseif okCost and estCost == nil then
+                pointValid = false
+            end
+        end
+
+        if pointValid then
+            -- Charge/refuel up to warpCost if needed before checking fuel
+            if warpCost > 0 then
+                self:ensureFuel(warpCost)
+            end
+            local curFuel = (turtle and turtle.getFuelLevel) and turtle.getFuelLevel() or 0
+            local enoughFuel = (curFuel == "unlimited") or (type(curFuel) == "number" and curFuel >= warpCost)
+
+            if enoughFuel then
+                if type(automata.getWarpCooldown) == "function" then
+                    local cdOk, cd = pcall(automata.getWarpCooldown)
+                    if cdOk and type(cd) == "number" and cd > 0 then
+                        sleepSeconds(math.min(cd / 1000, 1.5))
+                    end
+                end
+
+                local okWarp, warpRes, warpErr = pcall(automata.warpToPoint, HOME_WARP_NAME)
+                if not (okWarp and warpRes == true) and type(warpErr) == "string" and warpErr:lower():find("cooldown", 1, true) then
+                    sleepSeconds(0.6)
+                    okWarp, warpRes, warpErr = pcall(automata.warpToPoint, HOME_WARP_NAME)
+                end
+
+                if okWarp and warpRes == true then
+                    self.pos.x = self.home.x
+                    self.pos.y = self.home.y
+                    self.pos.z = self.home.z
+                    self:savePos()
+                    -- Ensure turtle is aligned with Home's facing direction
+                    self:turnTo(self.home.dir or 0)
+                    self.lastAction = "Teleported to Home and aligned."
+                    return true, "teleported"
+                end
+            end
+        end
+    end
+
+    -- 2. Fallback: Dig to Home when End Automata is broken/missing or warp fuel cost > available fuel
+    self.lastAction = ("Digging to Home (%d, %d, %d)..."):format(
         self.home.x, self.home.y, self.home.z
     )
     local ok = self:moveTo(self.home.x, self.home.y, self.home.z, false, false)
     if ok then
         self:turnTo(self.home.dir or 0)
-        self.lastAction = "Arrived at Home."
+        self:saveHomeWarpPoint()
+        self.lastAction = "Arrived at Home and aligned (dug path)."
     else
-        self.lastAction = "Blocked while returning to Home!"
+        self.lastAction = "Blocked while digging to Home!"
     end
-    return ok
+    return ok, "dug"
 end
 
 function TurtleMiner:isAtHome()
@@ -1172,12 +1751,83 @@ function TurtleMiner:isAtHome()
 end
 
 --------------------------------------------------------------------------------
+-- Chunk Boundaries & Vertical Chunk Sweep
+--------------------------------------------------------------------------------
+
+--- Compute the horizontal `(minX, maxX, minZ, maxZ, centerX, centerZ)` bounds of the turtle's target chunk.
+function TurtleMiner:getChunkBounds()
+    if self.home and self.home.useGps then
+        local minX = math.floor(self.home.x / 16) * 16
+        local maxX = minX + 15
+        local minZ = math.floor(self.home.z / 16) * 16
+        local maxZ = minZ + 15
+        return minX, maxX, minZ, maxZ, minX + 7, minZ + 7
+    end
+    local r = self.scanRadius or 8
+    local hx = (self.home and self.home.x) or 0
+    local hz = (self.home and self.home.z) or 0
+    return hx - r, hx + r, hz - r, hz + r, hx, hz
+end
+
+--- Check if world coordinates `(worldX, worldZ)` lie within the target chunk.
+function TurtleMiner:isInTargetChunk(worldX, worldZ)
+    local minX, maxX, minZ, maxZ = self:getChunkBounds()
+    return worldX >= minX and worldX <= maxX and worldZ >= minZ and worldZ <= maxZ
+end
+
+--- Descend deeper into the target chunk column so the next scan covers deeper Y levels of the chunk.
+function TurtleMiner:advanceInChunk()
+    local _, _, _, _, centerX, centerZ = self:getChunkBounds()
+
+    -- If GPS chunk boundaries are known and turtle is far from the chunk's horizontal center,
+    -- step toward the center so an r=8 scan (17x17) covers all 16x16 columns of the chunk.
+    if self.home and self.home.useGps then
+        if math.abs(self.pos.x - centerX) > 2 or math.abs(self.pos.z - centerZ) > 2 then
+            self:moveTo(centerX, self.pos.y, centerZ, false, true)
+            if not self.running then
+                return false, "stopped"
+            end
+        end
+    end
+
+    local targetY = self.pos.y - self.scanRadius
+    if self.lastChunkMiningY and self.lastChunkMiningY < self.pos.y then
+        targetY = math.min(targetY, self.lastChunkMiningY)
+    end
+
+    local stepsToDescend = math.max(1, math.min(self.scanRadius, self.pos.y - targetY))
+    local stepsMoved = 0
+    local lastReason = nil
+
+    for _ = 1, stepsToDescend do
+        if not self.running then
+            return stepsMoved > 0, "stopped"
+        end
+        local ok, reason = self:stepDown(true)
+        if ok then
+            stepsMoved = stepsMoved + 1
+            self.lastChunkMiningY = math.min(self.lastChunkMiningY or self.pos.y, self.pos.y)
+        else
+            lastReason = reason
+            break
+        end
+    end
+
+    if stepsMoved > 0 then
+        return true, nil
+    end
+    return false, lastReason or "blocked"
+end
+
+--------------------------------------------------------------------------------
 -- Single Step of the Worker State Machine
 --------------------------------------------------------------------------------
 
 function TurtleMiner:finishStopReturnHome()
     if not self:isAtHome() then
         self:returnToHome()
+    else
+        self:turnTo(self.home.dir or 0)
     end
     self.pendingReturnOnStop = false
     self.phase = "IDLE (Stopped)"
@@ -1198,6 +1848,10 @@ function TurtleMiner:stepWorker()
 
     self.inWorkerStep = true
 
+    if self:isAtHome() and not self.homeWarpSaved then
+        self:saveHomeWarpPoint()
+    end
+
     -- 1. If we are waiting at Home for ores to be unloaded, check if ores are gone
     if self.phase == "WAITING AT HOME" then
         if self:hasOresInInventory() then
@@ -1206,17 +1860,16 @@ function TurtleMiner:stepWorker()
             self.inWorkerStep = false
             return "waiting_unload"
         else
-            -- All ores have been removed! Clean up any leftover waste stone so inventory isn't full
             if self:isInventoryFull() then
-                self:dropWasteBlocks()
+                self:placeWasteBlocks()
             end
             self.phase = "MINING"
-            self.lastAction = "Inventory cleared of ores! Resuming mining..."
+            self.lastAction = "Inventory cleared of ores! Resuming chunk mining..."
         end
     end
 
-    -- 2. Discard any non-ore waste blocks (dirt, cobblestone, etc.) and check if inventory is full of ores
-    self:dropWasteBlocks()
+    -- 2. Place any waste blocks if inventory is full, then check if inventory is full of ores
+    self:clearWasteIfFull()
     if self:isInventoryFull() then
         self:returnToHome()
         self.inWorkerStep = false
@@ -1233,14 +1886,14 @@ function TurtleMiner:stepWorker()
         end
     end
 
-    -- 3. Check fuel before scanning or moving
+    -- 3. Ensure fuel (charges with energy via End Automata first, then refuels)
     if not self:ensureFuel(1) then
-        self.lastAction = "OUT OF FUEL (0)! Put coal/fuel in turtle"
+        self.lastAction = "OUT OF FUEL (0)! Add energy cell or fuel to turtle"
         self.inWorkerStep = false
         return "no_fuel"
     end
 
-    -- 4. Scan for nearby blocks and ores by tag (while pre-marking any allthemodium:teleport_pad)
+    -- 4. Scan for blocks & ores in the current chunk
     self.phase = "MINING"
     local scanner = self:ensureScanner()
     if not scanner then
@@ -1266,31 +1919,63 @@ function TurtleMiner:stepWorker()
 
     local ores = {}
     for _, b in ipairs(scannedBlocks) do
+        local wx = self.pos.x + b.x
+        local wy = self.pos.y + b.y
+        local wz = self.pos.z + b.z
         if self:isProtectedBlock(b.name) then
-            self:markBlocked(self.pos.x + b.x, self.pos.y + b.y, self.pos.z + b.z)
-        elseif GeoScanner.hasOreTag(b) then
+            self:markBlocked(wx, wy, wz)
+        elseif GeoScanner.hasOreTag(b) and self:isInTargetChunk(wx, wz) then
             table.insert(ores, b)
         end
     end
 
+    -- 5. If no ores in the current r=8 window, analyze the chunk (`chunkAnalyze()`) and descend if ores remain
     if #ores == 0 then
-        -- No ores in current radius; if we have ores and have explored enough, or can step forward
+        local chunkInfo = scanner:analyzeChunk({
+            retries = 5,
+            retryDelay = 0.5,
+        })
+        if chunkInfo and type(chunkInfo.total) == "number" then
+            self.chunkOresRemaining = chunkInfo.total
+            if chunkInfo.total == 0 then
+                -- Entire chunk has 0 ores remaining! Return to Home.
+                if not self:isAtHome() then
+                    self:returnToHome()
+                else
+                    self:turnTo(self.home.dir or 0)
+                end
+                self.inWorkerStep = false
+                if not self.running then
+                    return self:finishStopReturnHome()
+                end
+                if self:hasOresInInventory() then
+                    self.phase = "WAITING AT HOME"
+                    local _, oreCount = self:getInventoryStats()
+                    self.lastAction = ("Chunk mined! Waiting for %d ore(s) to unload..."):format(oreCount)
+                    return "waiting_unload"
+                end
+                self.lastAction = "Chunk mining complete! 0 ores left in chunk."
+                return "no_ores"
+            end
+        end
+
         if self.exploreCount < self.maxExploreSteps then
             self.exploreCount = self.exploreCount + 1
-            self.lastAction = ("No ores in r=%d. Advancing (%d/%d)..."):format(
-                self.scanRadius, self.exploreCount, self.maxExploreSteps
-            )
-            self:stepForward(true)
+            local movedDown = self:advanceInChunk()
             self.inWorkerStep = false
             if not self.running then
                 return self:finishStopReturnHome()
             end
-            return "exploring"
-        else
-            self.lastAction = ("No nearby ores found in r=%d."):format(self.scanRadius)
-            self.inWorkerStep = false
-            return "no_ores"
+            if movedDown then
+                local remStr = self.chunkOresRemaining and ("%d chunk ores left"):format(self.chunkOresRemaining) or "scanning chunk"
+                self.lastAction = ("Descending in chunk to Y=%d (%s)..."):format(self.pos.y, remStr)
+                return "exploring"
+            end
         end
+
+        self.lastAction = "No more reachable ores in chunk."
+        self.inWorkerStep = false
+        return "no_ores"
     end
 
     self.exploreCount = 0
@@ -1313,9 +1998,11 @@ function TurtleMiner:stepWorker()
         end
         if mined then
             minedTarget = target
+            if self.chunkOresRemaining and self.chunkOresRemaining > 0 then
+                self.chunkOresRemaining = self.chunkOresRemaining - 1
+            end
             break
         end
-        -- If movement failed due to fuel, missing pickaxe, or unbreakable/claimed block, stop trying other ores this tick
         if self.lastMoveError then
             break
         end
@@ -1333,8 +2020,8 @@ function TurtleMiner:stepWorker()
         return "move_blocked"
     end
 
-    -- Discard any non-ore blocks picked up while tunneling, then check if inventory is full of ores
-    self:dropWasteBlocks()
+    -- Place any waste blocks if full, then return Home if inventory is full of ores
+    self:clearWasteIfFull()
     if self:isInventoryFull() then
         self:returnToHome()
         if not self.running then
@@ -1383,7 +2070,7 @@ function TurtleMiner:drawUI()
     setCol(colors.white, colors.black)
     term.clear()
 
-    line(1, " MinerHaven Turtle Auto-Miner", colors.white, isColor and colors.blue or colors.black)
+    line(1, " MinerHaven End Automata Miner", colors.white, isColor and colors.blue or colors.black)
 
     local stateColor = colors.yellow
     if self.running then
@@ -1392,6 +2079,7 @@ function TurtleMiner:drawUI()
 
     local usedSlots, oreItems = self:getInventoryStats()
     local fuel = (turtle and turtle.getFuelLevel) and tostring(turtle.getFuelLevel()) or "N/A"
+    local chunkStr = self.chunkOresRemaining ~= nil and (" | Chunk: %d"):format(self.chunkOresRemaining) or ""
 
     line(2, (" State : %s"):format(self.phase), stateColor, colors.black)
     line(3, (" Home  : (%d, %d, %d) [%s]"):format(
@@ -1400,7 +2088,7 @@ function TurtleMiner:drawUI()
     line(4, (" Pos   : (%d, %d, %d) [%s]  Fuel: %s"):format(
         self.pos.x, self.pos.y, self.pos.z, DIR_NAMES[self.pos.dir or 0] or "N", fuel
     ), colors.white, colors.black)
-    line(5, (" Inv   : %d/16 slots | Ores: %d"):format(usedSlots, oreItems), colors.cyan, colors.black)
+    line(5, (" Inv   : %d/16 | Ores: %d%s"):format(usedSlots, oreItems, chunkStr), colors.cyan, colors.black)
     line(6, " " .. string.rep("-", math.max(1, w - 2)), colors.gray, colors.black)
     line(7, " " .. tostring(self.lastAction or ""), colors.yellow, colors.black)
     line(8, " " .. string.rep("-", math.max(1, w - 2)), colors.gray, colors.black)
@@ -1498,7 +2186,6 @@ function TurtleMiner:runDaemon()
     if parallel and type(parallel.waitForAny) == "function" then
         parallel.waitForAny(workerLoop, inputLoop)
     else
-        -- Pure Lua coroutine fallback when `parallel` is not in global scope
         local coWorker = coroutine.create(workerLoop)
         local coInput = coroutine.create(inputLoop)
         coroutine.resume(coWorker)
@@ -1544,7 +2231,6 @@ if #args > 0 then
             os.queueEvent("minerhaven_command", "start")
         end
         print("[MinerHaven] Turtle Miner STARTED.")
-        -- Launch or stay in daemon mode unless --no-daemon is passed
         if args[2] == "--bg" or args[2] == "--signal-only" then
             return TurtleMiner
         end
@@ -1582,12 +2268,12 @@ if #args > 0 then
         print(("Inventory: %d/16 slots (%d ores)"):format(usedSlots, oreItems))
         return TurtleMiner
     elseif sub == "help" or sub == "-h" or sub == "--help" then
-        print("MinerHaven Turtle Auto-Miner")
+        print("MinerHaven End Automata Auto-Miner")
         print("Usage:")
         print("  miner                  Run interactive startup daemon")
-        print("  miner start            Start mining nearby ores by tag")
-        print("  miner stop             Stop mining and stay idle")
-        print("  miner sethome [n/e/s/w] Save current location as Home")
+        print("  miner start            Start mining chunk ores by tag")
+        print("  miner stop             Stop mining, return Home, and stay idle")
+        print("  miner sethome [n/e/s/w] Save current location & warp point as Home")
         print("  miner status           Show current status and home")
         return TurtleMiner
     end

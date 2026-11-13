@@ -503,31 +503,282 @@ assertEq(noFuelStatus, "no_fuel", "stepWorker returns no_fuel immediately when f
 assertEq(rotations, 0, "turtle does NOT rotate when out of fuel")
 assertTrue(miner2.lastAction:find("OUT OF FUEL", 1, true) ~= nil, "displays clear OUT OF FUEL message instead of Could not reach Iron Ore")
 
--- Test 8D: Discarding non-ore blocks (dirt, cobblestone, etc.) while keeping ores and fuel
+-- Test 8D: Placing non-ore waste blocks (dirt, cobblestone, etc.) in the turtle's path while keeping ores, tools, and energy items
 local testInv = {
     [1] = { name = "minecraft:raw_iron", count = 8, tags = { ["forge:raw_materials"] = true } },
-    [2] = { name = "minecraft:dirt", count = 32, tags = {} },
-    [3] = { name = "minecraft:cobblestone", count = 64, tags = {} },
-    [4] = { name = "minecraft:coal", count = 16, tags = {} },
-    [5] = { name = "minecraft:cobbled_deepslate", count = 20, tags = {} },
+    [2] = { name = "minecraft:dirt", count = 1, tags = {} },
+    [3] = { name = "minecraft:cobblestone", count = 1, tags = {} },
+    [4] = { name = "mekanism:energy_tablet", count = 1, tags = {} },
+    [5] = { name = "minecraft:cobbled_deepslate", count = 1, tags = {} },
 }
 local selectedSlot = 1
+local placedDirs = {}
+miner2.pos = { x = 5, y = 10, z = 5, dir = 0 }
+miner2.home = { x = 0, y = 64, z = 0, dir = 0 }
 _G.turtle.select = function(s) selectedSlot = s; return true end
 _G.turtle.getSelectedSlot = function() return selectedSlot end
 _G.turtle.getItemCount = function(s) return testInv[s] and testInv[s].count or 0 end
 _G.turtle.getItemDetail = function(s) return testInv[s] end
-_G.turtle.dropDown = function()
-    testInv[selectedSlot] = nil
+_G.turtle.placeDown = function()
+    if testInv[selectedSlot] then
+        table.insert(placedDirs, { dir = "down", item = testInv[selectedSlot].name })
+        testInv[selectedSlot] = nil
+        return true
+    end
+    return false
+end
+_G.turtle.placeUp = function()
+    if testInv[selectedSlot] then
+        table.insert(placedDirs, { dir = "up", item = testInv[selectedSlot].name })
+        testInv[selectedSlot] = nil
+        return true
+    end
+    return false
+end
+_G.turtle.place = function()
+    if testInv[selectedSlot] then
+        table.insert(placedDirs, { dir = "forward", item = testInv[selectedSlot].name })
+        testInv[selectedSlot] = nil
+        return true
+    end
+    return false
+end
+
+-- Place waste block in path after stepping down (places Up into vacated block)
+local placedPath = miner2:placeWasteInPath("down")
+assertTrue(placedPath, "placed waste block in path after stepDown")
+assertEq(placedDirs[1].dir, "up", "stepDown places waste block UP into the vacated shaft")
+assertEq(placedDirs[1].item, "minecraft:dirt", "placed dirt from slot 2")
+assertEq(testInv[2], nil, "slot 2 dirt was consumed by placing")
+
+-- Place remaining waste blocks via placeWasteBlocks()
+local placedCount = miner2:placeWasteBlocks()
+assertEq(placedCount, 2, "placed remaining 2 slots of waste blocks (cobblestone, cobbled_deepslate)")
+assertTrue(testInv[1] ~= nil, "kept raw_iron ore in slot 1")
+assertEq(testInv[3], nil, "placed cobblestone from slot 3")
+assertTrue(testInv[4] ~= nil, "kept mekanism:energy_tablet in slot 4")
+assertEq(testInv[5], nil, "placed cobbled_deepslate from slot 5")
+
+-- 9. Test End Automata Upgrade:
+--    9A: Save Home warp point (`savePoint("home")`) & Teleport to Home (`warpToPoint("home")`) + Alignment with Home (`home.dir`)
+--    9B: Energy charging via `automata.chargeTurtle()`
+--    9C: Fallback to dig-to-home when warp fuel cost > available fuel OR when End Automata breaks
+--    9D: Digging blocks via `automata.digBlock()` when no side pickaxe is equipped
+--    9E: Mining the chunk's ores via `chunkAnalyze()` + vertical chunk descent
+local savedWarpPoints = {}
+local warpCount = 0
+local currentFuelLevel = 50
+local mockWarpCost = 200
+local automataIntact = true
+local chargeCalls = 0
+local automataDigCalls = 0
+
+local mockEndAutomata = {
+    savePoint = function(name)
+        savedWarpPoints[name] = { x = 10, y = 64, z = 20 }
+        return true
+    end,
+    points = function()
+        local list = {}
+        for k, _ in pairs(savedWarpPoints) do
+            table.insert(list, k)
+        end
+        return list
+    end,
+    estimateWarpCost = function(name)
+        if not savedWarpPoints[name] then
+            return nil, "Cannot find point to teleport"
+        end
+        return mockWarpCost
+    end,
+    getWarpCooldown = function() return 0 end,
+    warpToPoint = function(name)
+        if not savedWarpPoints[name] then
+            return nil, "Cannot find point to teleport"
+        end
+        if currentFuelLevel < mockWarpCost then
+            return nil, "Not enough fuel"
+        end
+        currentFuelLevel = currentFuelLevel - mockWarpCost
+        warpCount = warpCount + 1
+        return true
+    end,
+    getChargeCooldown = function() return 0 end,
+    chargeTurtle = function()
+        local detail = _G.turtle.getItemDetail(_G.turtle.getSelectedSlot())
+        if detail and detail.name == "mekanism:energy_tablet" and (detail.energy or 0) > 0 then
+            local add = math.min(500, detail.energy)
+            detail.energy = detail.energy - add
+            currentFuelLevel = currentFuelLevel + add
+            chargeCalls = chargeCalls + 1
+            return true, add
+        end
+        return nil, "Item cannot provide energy"
+    end,
+    getDigCooldown = function() return 0 end,
+    digBlock = function(opts)
+        automataDigCalls = automataDigCalls + 1
+        return true
+    end,
+    collectItems = function()
+        return true, 1
+    end,
+}
+
+_G.peripheral = {
+    find = function(pType)
+        if pType == "geoScanner" then
+            return mockPeripheral
+        end
+        if automataIntact and (pType == "endAutomata" or pType == "end_automata") then
+            return mockEndAutomata
+        end
+        return nil
+    end,
+    getName = function(p)
+        if p == mockEndAutomata then return "right" end
+        return "left"
+    end,
+    isPresent = function(side)
+        if side == "right" then return automataIntact end
+        return side == "left"
+    end,
+    wrap = function(side)
+        if side == "right" and automataIntact then return mockEndAutomata end
+        if side == "left" then return mockPeripheral end
+        return nil
+    end,
+}
+
+local automataInv = {
+    [1] = { name = "minecraft:diamond_pickaxe", count = 1, tags = {} },
+    [2] = { name = "mekanism:energy_tablet", count = 1, energy = 1000, tags = {} },
+}
+local autoSelectedSlot = 1
+
+_G.turtle = {
+    getFuelLevel = function() return currentFuelLevel end,
+    getSelectedSlot = function() return autoSelectedSlot end,
+    select = function(s) autoSelectedSlot = s; return true end,
+    getItemCount = function(s) return automataInv[s] and automataInv[s].count or 0 end,
+    getItemDetail = function(s) return automataInv[s] end,
+    forward = function()
+        currentFuelLevel = math.max(0, currentFuelLevel - 1)
+        return true
+    end,
+    up = function()
+        currentFuelLevel = math.max(0, currentFuelLevel - 1)
+        return true
+    end,
+    down = function()
+        currentFuelLevel = math.max(0, currentFuelLevel - 1)
+        return true
+    end,
+    turnLeft = function() return true end,
+    turnRight = function() return true end,
+    detect = function() return false end,
+    detectUp = function() return false end,
+    detectDown = function() return false end,
+    -- Simulate an End Automata Turtle that has NO permanent side pickaxe (`turtle.dig` returns false),
+    -- so it must use `automata.digBlock()` with the pickaxe in slot 1!
+    dig = function() return false, "No tool to dig with" end,
+    digUp = function() return false, "No tool to dig with" end,
+    digDown = function() return false, "No tool to dig with" end,
+    placeDown = function() return true end,
+    placeUp = function() return true end,
+    place = function() return true end,
+}
+
+_G.gps = {
+    locate = function() return 10, 64, 20 end,
+}
+
+local miner3 = turtleMinerMod.new()
+miner3:sethome("e") -- Home at (10, 64, 20) facing East (dir = 1)
+assertTrue(savedWarpPoints["home"] ~= nil, "sethome saved 'home' warp point on End Automata")
+assertEq(miner3.home.dir, 1, "home facing direction is East (1)")
+
+-- Move miner3 away from Home to (14, 30, 22) facing West (dir = 3)
+miner3.pos = { x = 14, y = 30, z = 22, dir = 3 }
+
+-- Test 9A & 9B: `returnToHome()` sees currentFuelLevel (50) < mockWarpCost (200),
+-- automatically charges the turtle from `mekanism:energy_tablet` via `automata.chargeTurtle()`,
+-- then teleports to `"home"` via `automata.warpToPoint("home")` and aligns with Home (`dir = 1`)!
+local retOk, retMode = miner3:returnToHome()
+assertTrue(retOk, "returnToHome succeeded via End Automata")
+assertEq(retMode, "teleported", "returnToHome used End Automata warpToPoint('home')")
+assertTrue(chargeCalls >= 1, "charged turtle using energy item via automata.chargeTurtle()")
+assertEq(warpCount, 1, "warpToPoint('home') was called once")
+assertTrue(miner3:isAtHome(), "turtle coordinates updated to Home (10, 64, 20)")
+assertEq(miner3.pos.dir, 1, "turtle aligned its facing direction with Home (East = 1)")
+
+-- Test 9C-1: Fallback to dig-to-home when warp fuel cost is MORE than available fuel (and energy tablet is empty)
+automataInv[2].energy = 0 -- Energy tablet depleted
+currentFuelLevel = 50     -- Enough fuel to walk/dig 6 blocks, but LESS than mockWarpCost (200)
+miner3.pos = { x = 12, y = 62, z = 21, dir = 0 }
+local fallbackOk1, fallbackMode1 = miner3:returnToHome()
+assertTrue(fallbackOk1, "fallback dig-to-home succeeded when warp fuel cost > available fuel")
+assertEq(fallbackMode1, "dug", "used dig-to-home fallback when fuel < estimateWarpCost('home')")
+assertEq(warpCount, 1, "did NOT call warpToPoint when fuel < warpCost")
+assertTrue(miner3:isAtHome(), "arrived at Home (10, 64, 20) via dig-to-home fallback")
+assertEq(miner3.pos.dir, 1, "aligned with Home facing direction (East = 1) after dig-to-home")
+
+-- Test 9C-2: Fallback to dig-to-home when the End Automata breaks (`automataIntact = false`)
+automataIntact = false
+currentFuelLevel = 500
+miner3.pos = { x = 11, y = 60, z = 20, dir = 2 }
+local fallbackOk2, fallbackMode2 = miner3:returnToHome()
+assertTrue(fallbackOk2, "fallback dig-to-home succeeded when End Automata broke")
+assertEq(fallbackMode2, "dug", "used dig-to-home fallback when End Automata is broken")
+assertTrue(miner3:isAtHome(), "arrived at Home (10, 64, 20) when End Automata is broken")
+assertEq(miner3.pos.dir, 1, "aligned with Home facing direction (East = 1)")
+
+-- Test 9D & 9E: Restore End Automata, test digging with `automata.digBlock()` and mining the chunk's ores across Y levels
+automataIntact = true
+currentFuelLevel = 1000
+miner3:sethome("n")
+miner3:start()
+
+-- Set up a chunk where there are 0 ores at surface Y=64, and 1 deep diamond ore at Y=56 (8 blocks down)
+local deepOreMined = false
+mockPeripheral.chunkAnalyze = function()
+    if deepOreMined then
+        return {}
+    end
+    return { ["minecraft:deepslate_diamond_ore"] = 1 }
+end
+mockPeripheral.scan = function()
+    if not deepOreMined and miner3.pos.y <= 56 then
+        return {
+            { name = "minecraft:deepslate_diamond_ore", x = 1, y = 0, z = 0, tags = { "forge:ores" } },
+        }
+    end
+    return {}
+end
+mockEndAutomata.digBlock = function(opts)
+    automataDigCalls = automataDigCalls + 1
+    if miner3.pos.y <= 56 then
+        deepOreMined = true
+        automataInv[3] = { name = "minecraft:diamond", count = 1, tags = { ["forge:gems"] = true } }
+    end
     return true
 end
-_G.turtle.drop = _G.turtle.dropDown
 
-local droppedCount = miner2:dropWasteBlocks()
-assertEq(droppedCount, 3, "dropped 3 slots of non-ore blocks (dirt, cobblestone, cobbled_deepslate)")
-assertTrue(testInv[1] ~= nil, "kept raw_iron ore in slot 1")
-assertEq(testInv[2], nil, "discarded dirt in slot 2")
-assertEq(testInv[3], nil, "discarded cobblestone in slot 3")
-assertTrue(testInv[4] ~= nil, "kept coal fuel in slot 4")
-assertEq(testInv[5], nil, "discarded cobbled_deepslate in slot 5")
+-- Worker step 1 at Y=64: local scan(8) finds 0 ores, chunkAnalyze() reports 1 ore in chunk -> descends to Y=56!
+local chunkStep1 = miner3:stepWorker()
+assertEq(chunkStep1, "exploring", "stepWorker descends into chunk when chunkAnalyze() reports remaining ores")
+assertEq(miner3.pos.y, 56, "turtle descended 8 blocks into the chunk to Y=56")
+
+-- Worker step 2 at Y=56: local scan(8) finds the deep diamond ore in the chunk and mines it using `automata.digBlock()`!
+local chunkStep2 = miner3:stepWorker()
+assertEq(chunkStep2, "mined", "stepWorker mined the deep chunk ore at Y=56")
+assertTrue(deepOreMined, "deep chunk ore was mined via End Automata digBlock()")
+assertTrue(automataDigCalls >= 1, "automata.digBlock() was used to mine the ore")
+
+-- Worker step 3: chunkAnalyze() now reports 0 ores left in the chunk -> teleports Home and waits for the mined diamond to unload!
+local chunkStep3 = miner3:stepWorker()
+assertEq(chunkStep3, "waiting_unload", "once chunk has 0 ores left, turtle teleports Home and waits for ore unload")
+assertTrue(miner3:isAtHome(), "turtle teleported back to Home after finishing chunk")
+assertEq(miner3.chunkOresRemaining, 0, "chunkOresRemaining is 0")
 
 print(("ALL %d ASSERTIONS PASSED!"):format(passed))

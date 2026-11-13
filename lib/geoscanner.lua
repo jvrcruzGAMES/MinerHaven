@@ -16,6 +16,16 @@ GeoScanner.PERIPHERAL_TYPES = {
     "geo_scanner",
 }
 
+--- Known End Automata / Automata peripheral type names across Advanced Peripherals versions.
+GeoScanner.AUTOMATA_TYPES = {
+    "endAutomata",
+    "end_automata",
+    "overpoweredEndAutomata",
+    "overpowered_end_automata",
+    "weakAutomata",
+    "weak_automata",
+}
+
 --- Default patterns that identify a block as an ore when tags are missing or alongside tags.
 GeoScanner.DEFAULT_ORE_PATTERNS = {
     "_ore$",
@@ -182,6 +192,33 @@ GeoScanner.WASTE_BLOCKS = {
     ["allthemodium:ancient_moss"] = true,
 }
 
+--- Check whether an item registry name is a battery / energy capacitor / FE cell for `chargeTurtle()`.
+-- @tparam string name Item registry ID
+-- @treturn boolean
+function GeoScanner.isEnergyItemName(name)
+    if type(name) ~= "string" then
+        return false
+    end
+    local lower = name:lower()
+    if lower:find("_ore", 1, true) then
+        return false
+    end
+    if lower:find("energy", 1, true)
+        or lower:find("battery", 1, true)
+        or lower:find("capacitor", 1, true)
+        or lower:find("flux_", 1, true)
+        or lower:find("_cell", 1, true)
+        or lower:find("energy_tablet", 1, true)
+        or lower:find("energy_cube", 1, true)
+        or lower:find("accumulator", 1, true)
+        or lower:find("power_cell", 1, true)
+        or lower:find("charge_crystal", 1, true)
+    then
+        return true
+    end
+    return false
+end
+
 --- Check whether a block or item name is a common non-ore terrain/waste block.
 -- @tparam string name Block or item registry name
 -- @treturn boolean
@@ -190,6 +227,9 @@ function GeoScanner.isWasteName(name)
         return false
     end
     local lower = name:lower()
+    if GeoScanner.isEnergyItemName(lower) then
+        return false
+    end
     if GeoScanner.WASTE_BLOCKS[lower] then
         return true
     end
@@ -240,7 +280,7 @@ function GeoScanner.isOreItem(itemDetail, trackedMinedItems)
         return false
     end
     local name = itemDetail.name:lower()
-    if GeoScanner.isWasteName(name) then
+    if GeoScanner.isWasteName(name) or GeoScanner.isEnergyItemName(name) then
         return false
     end
     if trackedMinedItems and trackedMinedItems[name] then
@@ -447,6 +487,65 @@ function GeoScanner.find(sideOrName)
     end
 
     return nil, "No Geo Scanner found. Attach a Geo Scanner to your computer, turtle, or pocket computer."
+end
+
+--- Check if a peripheral table is an End Automata (or Automata Core) peripheral.
+-- @tparam table p Peripheral table
+-- @treturn boolean
+function GeoScanner.isAutomataPeripheral(p)
+    if type(p) ~= "table" then
+        return false
+    end
+    return type(p.warpToPoint) == "function"
+        or type(p.savePoint) == "function"
+        or type(p.chargeTurtle) == "function"
+        or type(p.digBlock) == "function"
+end
+
+--- Find a connected End Automata (or Automata Core) peripheral automatically.
+-- @tparam[opt] string sideOrName Specific side or network name
+-- @treturn table|nil, string|nil Peripheral table and its side/name (or `nil, err`)
+function GeoScanner.findAutomata(sideOrName)
+    if not peripheral then
+        return nil, "CC: Tweaked peripheral API is not available"
+    end
+
+    if type(sideOrName) == "string" and sideOrName ~= "" then
+        if peripheral.isPresent and peripheral.isPresent(sideOrName) then
+            local p = peripheral.wrap and peripheral.wrap(sideOrName)
+            if GeoScanner.isAutomataPeripheral(p) then
+                return p, sideOrName
+            end
+        end
+        return nil, ("No End Automata found on '%s'"):format(sideOrName)
+    end
+
+    if type(peripheral.find) == "function" then
+        for _, aType in ipairs(GeoScanner.AUTOMATA_TYPES) do
+            local p = peripheral.find(aType)
+            if GeoScanner.isAutomataPeripheral(p) then
+                local foundName = aType
+                if peripheral.getName then
+                    local ok, n = pcall(peripheral.getName, p)
+                    if ok and n then
+                        foundName = n
+                    end
+                end
+                return p, foundName
+            end
+        end
+    end
+
+    if type(peripheral.getNames) == "function" and type(peripheral.wrap) == "function" then
+        for _, name in ipairs(peripheral.getNames()) do
+            local p = peripheral.wrap(name)
+            if GeoScanner.isAutomataPeripheral(p) then
+                return p, name
+            end
+        end
+    end
+
+    return nil, "No End Automata found"
 end
 
 --- Get the FE/fuel cost for scanning at the given radius.

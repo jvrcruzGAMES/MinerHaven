@@ -34,23 +34,29 @@ When you run `install.lua`, it asks whether the installation is for a **Turtle**
 
 ---
 
-## Turtle Auto-Miner (`turtle_miner.lua` / `miner`)
+## Turtle Auto-Miner (`turtle_miner.lua` / `miner`) — End Automata Edition
 
-When installed for a Turtle, **MinerHaven Turtle Auto-Miner** loads automatically on startup and stays running on the turtle screen.
+When installed for a Turtle, **MinerHaven End Automata Auto-Miner** loads automatically on startup and stays running on the turtle screen. It is designed for an [Advanced Peripherals End Automata](https://docs.advanced-peripherals.de/0.7/turtles/metaphysics/end_automata/) + [Geo Scanner](https://docs.advanced-peripherals.de/0.7/peripherals/geo_scanner/) turtle.
 
 ### How It Works
 - **`start` instruction**:
-  1. Scans for nearby ores **by block tag** (`#forge:ores`, `#c:ores`, `#minecraft:*_ores`) using the Geo Scanner.
-  2. Navigates to and mines the nearest ores until the turtle's **16-slot inventory is full**:
+  1. **Chunk Ore Mining**: Uses `chunkAnalyze()` and `scan(8)` to systematically mine **all ores in the turtle's current chunk** (`#forge:ores`, `#c:ores`, `#minecraft:*_ores`), descending through the chunk column as each vertical slice is cleared until `0` ores remain in the chunk.
+  2. **End Automata Digging & Movement**:
+     - Breaks blocks using `automata.digBlock()` (holding a pickaxe in the turtle's inventory) or a side-equipped pickaxe.
      - **Down-first movement priority**: Prefers moving **down (`-Y`)** first before moving horizontally in the direction of the ore.
-     - **Obstacle breaking & Teleport Pad protection**: Breaks obstructing blocks along its path **except `allthemodium:teleport_pad`**. If an `allthemodium:teleport_pad` is detected (via Geo Scanner scan or `turtle.inspect`), the turtle leaves it untouched and automatically pathfinds an alternative route around it to reach the target ore.
-  3. Automatically **returns to its saved Home** (`/home.cfg`).
-  4. **Waits at Home** until its inventory has **no more ores** (e.g., unloaded by a player or hopper), then automatically resumes mining!
+     - **Places Waste Blocks in Path**: Places non-ore waste blocks (`cobblestone`, `dirt`, `cobbled_deepslate`, `stone`, etc.) behind/around itself in its path (`placeUp`, `placeDown`, `place`) instead of dropping them on the ground.
+     - **Obstacle breaking & Teleport Pad protection**: Breaks obstructing blocks along its path **except `allthemodium:teleport_pad`**. If an `allthemodium:teleport_pad` is detected, the turtle leaves it untouched and automatically pathfinds an alternative route around it.
+  3. **Energy Charging (`chargeTurtle`)**:
+     - Automatically charges the turtle from FE/RF energy items in its inventory (such as an Energy Tablet, Flux Capacitor, or Battery) via `automata.chargeTurtle()`, falling back to `turtle.refuel()` if standard burnable fuel is present.
+  4. **Teleport to Home + Dig-to-Home Fallback**:
+     - When its 16-slot inventory is full (or when the chunk is finished), the turtle **teleports back to Home** via `automata.warpToPoint("home")` and **aligns its facing direction with Home**.
+     - **Dig-to-Home Fallback**: If the End Automata breaks or if the warp fuel cost (`estimateWarpCost("home")`) exceeds the turtle's available fuel, it automatically falls back to the 3D dig-to-home pathfinding system and aligns with Home upon arrival.
+  5. **Waits at Home** until its inventory has **no more ores** (e.g., unloaded by a player or hopper), then automatically resumes mining the chunk!
 - **`stop` instruction**:
-  - Immediately stops mining, **returns the turtle back to its Home** (even if its inventory is not full), and transitions to **`IDLE (Stopped)`**.
+  - Immediately stops mining, **teleports (or digs) back to its Home** (even if its inventory is not full), aligns with Home, and transitions to **`IDLE (Stopped)`**.
   - **Does not exit or terminate**—the program stays alive and idle at Home until you give the `start` instruction again.
 - **`sethome` instruction**:
-  - Sets the turtle's Home to the **current block it is in** and saves it to `/home.cfg`.
+  - Sets the turtle's Home to the **current block it is in**, saves it to `/home.cfg`, and registers the `"home"` warp point on the End Automata via `automata.savePoint("home")`.
 
 ### Controlling the Turtle Auto-Miner
 While the program is running on the Turtle screen, type a command and press **Enter** (or click the on-screen buttons on an Advanced Turtle):
