@@ -90,6 +90,13 @@ GeoScanner.BASE_PROTECTED_BLOCKS = {
     ["mekanism:elite_energy_cube"] = true,
     ["mekanism:ultimate_energy_cube"] = true,
     ["mekanism:creative_energy_cube"] = true,
+    -- Flux Networks power blocks
+    ["fluxnetworks:flux_plug"] = true,
+    ["fluxnetworks:flux_point"] = true,
+    ["fluxnetworks:flux_controller"] = true,
+    ["fluxnetworks:basic_flux_storage"] = true,
+    ["fluxnetworks:herculean_flux_storage"] = true,
+    ["fluxnetworks:gargantuan_flux_storage"] = true,
 }
 
 --- Check whether a block registry name is a forbidden/protected base block.
@@ -106,6 +113,7 @@ function GeoScanner.isProtectedBlockName(name)
     if lower:match("^computercraft:")
         or lower:match("^advancedperipherals:")
         or lower:match("^sophisticatedstorage:")
+        or lower:match("^fluxnetworks:")
         or lower:find("teleport_pad", 1, true)
         or lower:find("energy_cube", 1, true)
         or lower:find("wireless_modem", 1, true)

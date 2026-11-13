@@ -797,6 +797,8 @@ assertTrue(miner3:isProtectedBlock("advancedperipherals:geo_scanner"), "Geo Scan
 assertTrue(miner3:isProtectedBlock("sophisticatedstorage:barrel"), "Sophisticated Storage Barrel is forbidden")
 assertTrue(miner3:isProtectedBlock("sophisticatedstorage:gold_barrel"), "Sophisticated Storage Gold Barrel is forbidden")
 assertTrue(miner3:isProtectedBlock("mekanism:ultimate_energy_cube"), "Energy Cube is forbidden")
+assertTrue(miner3:isProtectedBlock("fluxnetworks:flux_plug"), "Flux Plug is forbidden")
+assertTrue(miner3:isProtectedBlock("fluxnetworks:flux_point"), "Flux Point is forbidden")
 assertTrue(miner3:isProtectedBlock("allthemodium:teleport_pad"), "Teleport Pad is forbidden")
 assertTrue(miner3:isProtectedBlock("minecraft:bedrock"), "Bedrock is forbidden")
 

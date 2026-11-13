@@ -49,7 +49,7 @@ When you run `install.lua`, it asks **which computer this installation is for** 
    - The Turtle (`turtle_miner.lua`) goes and mines the passed ore locations:
      - **Down-first movement priority**: Moves **down (`-Y`)** first before moving horizontally (`X/Z`).
      - **Places Waste Blocks in Path**: Places non-ore waste blocks (`cobblestone`, `dirt`, `cobbled_deepslate`, `stone`, etc.) in its path instead of dropping them.
-     - **Forbidden Base Blocks & Teleport Pad Protection**: Never breaks any Base blocks (`computercraft:*`, `advancedperipherals:*`, `sophisticatedstorage:*`, `mekanism:*_energy_cube`, `minecraft:barrel`, `minecraft:chest`), `allthemodium:teleport_pad`, or `minecraft:bedrock`, pathfinding around them if encountered.
+     - **Forbidden Base Blocks & Teleport Pad Protection**: Never breaks any Base blocks (`computercraft:*`, `advancedperipherals:*`, `sophisticatedstorage:*`, `mekanism:*_energy_cube`, `fluxnetworks:flux_plug`, `fluxnetworks:flux_point`, `minecraft:barrel`, `minecraft:chest`), `allthemodium:teleport_pad`, or `minecraft:bedrock`, pathfinding around them if encountered.
      - **Energy Cube Charging**: Charges the turtle from the Energy Cube in its inventory via `automata.chargeTurtle()`.
 3. **Teleport Back to Base**:
    - When the Turtle's 16-slot inventory is **full**, or when **no ores are left** in the passed list, the Turtle **teleports back to Home** via `automata.warpToPoint("home")` and aligns with Home (only digging its way back if there is not enough fuel to teleport).
