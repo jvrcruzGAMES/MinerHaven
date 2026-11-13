@@ -1253,67 +1253,69 @@ local deser = Workernet.unserialize(serStr)
 assertEq(#deser.ores, 2, "Workernet.unserialize recovers repeated entries")
 
 -- 13.3 6-Digit Numeric Pairing Handshake
-local testPairBus = {}
-local makePairModem = function(id)
-    return {
-        isOpen = function() return true end,
-        open = function() end,
-        close = function() end,
-        transmit = function(ch, rep, pkt) table.insert(testPairBus, { ch = ch, pkt = pkt }) end,
+do
+    local testPairBus = {}
+    local makePairModem = function(id)
+        return {
+            isOpen = function() return true end,
+            open = function() end,
+            close = function() end,
+            transmit = function(ch, rep, pkt) table.insert(testPairBus, { ch = ch, pkt = pkt }) end,
+        }
+    end
+    local netCtrl = Workernet.new({ modem = makePairModem(1), localId = 1 })
+    local netWork = Workernet.new({ modem = makePairModem(5), localId = 5 })
+
+    netCtrl.pullMessage = function(self)
+        for i, m in ipairs(testPairBus) do
+            if m.ch == self.pairChannel or m.ch == self.channel then
+                table.remove(testPairBus, i)
+                return m.pkt, m.pkt and m.pkt.from or nil, m.ch
+            end
+        end
+        return nil
+    end
+    netWork.pullMessage = function(self)
+        for i, m in ipairs(testPairBus) do
+            if m.ch == self.pairChannel or m.ch == self.channel then
+                table.remove(testPairBus, i)
+                return m.pkt, m.pkt and m.pkt.from or nil, m.ch
+            end
+        end
+        return nil
+    end
+
+    local workerPairCode = "654321"
+    -- Controller initiates pairing with code 654321
+    local cNonce = "11223344"
+    local pairReq = {
+        type = "pair_req",
+        controller_id = 1,
+        nonce = cNonce,
+        sig = Crypto.hmacSha256(workerPairCode, "pair_req:1:" .. cNonce)
     }
+    table.insert(testPairBus, { ch = netWork.pairChannel, pkt = pairReq })
+
+    -- Worker receives pair_req
+    local wMsg = netWork:pullMessage()
+    assertTrue(Crypto.verifySignature(workerPairCode, "pair_req:1:" .. cNonce, wMsg.sig), "Worker verified pair_req signature")
+    local wNonce = "55667788"
+    local derivedKeyWorker = Crypto.kdf(workerPairCode, cNonce .. wNonce, "minerhaven_session_v1", 32)
+    local pairAck = {
+        type = "pair_ack",
+        worker_id = 5,
+        nonce = wNonce,
+        c_nonce = cNonce,
+        sig = Crypto.hmacSha256(workerPairCode, "pair_ack:5:" .. wNonce .. ":" .. cNonce)
+    }
+    table.insert(testPairBus, { ch = netCtrl.pairChannel, pkt = pairAck })
+
+    -- Controller receives pair_ack
+    local cAck = netCtrl:pullMessage()
+    assertTrue(Crypto.verifySignature(workerPairCode, "pair_ack:5:" .. wNonce .. ":" .. cNonce, cAck.sig), "Controller verified pair_ack signature")
+    local derivedKeyController = Crypto.kdf(workerPairCode, cNonce .. wNonce, "minerhaven_session_v1", 32)
+    assertEq(derivedKeyWorker, derivedKeyController, "Controller and Worker derived identical cryptographic session key")
 end
-local netCtrl = Workernet.new({ modem = makePairModem(1), localId = 1 })
-local netWork = Workernet.new({ modem = makePairModem(5), localId = 5 })
-
-netCtrl.pullMessage = function(self)
-    for i, m in ipairs(testPairBus) do
-        if m.ch == self.pairChannel or m.ch == self.channel then
-            table.remove(testPairBus, i)
-            return m.pkt, m.pkt and m.pkt.from or nil, m.ch
-        end
-    end
-    return nil
-end
-netWork.pullMessage = function(self)
-    for i, m in ipairs(testPairBus) do
-        if m.ch == self.pairChannel or m.ch == self.channel then
-            table.remove(testPairBus, i)
-            return m.pkt, m.pkt and m.pkt.from or nil, m.ch
-        end
-    end
-    return nil
-end
-
-local workerPairCode = "654321"
--- Controller initiates pairing with code 654321
-local cNonce = "11223344"
-local pairReq = {
-    type = "pair_req",
-    controller_id = 1,
-    nonce = cNonce,
-    sig = Crypto.hmacSha256(workerPairCode, "pair_req:1:" .. cNonce)
-}
-table.insert(testPairBus, { ch = netWork.pairChannel, pkt = pairReq })
-
--- Worker receives pair_req
-local wMsg = netWork:pullMessage()
-assertTrue(Crypto.verifySignature(workerPairCode, "pair_req:1:" .. cNonce, wMsg.sig), "Worker verified pair_req signature")
-local wNonce = "55667788"
-local derivedKeyWorker = Crypto.kdf(workerPairCode, cNonce .. wNonce, "minerhaven_session_v1", 32)
-local pairAck = {
-    type = "pair_ack",
-    worker_id = 5,
-    nonce = wNonce,
-    c_nonce = cNonce,
-    sig = Crypto.hmacSha256(workerPairCode, "pair_ack:5:" .. wNonce .. ":" .. cNonce)
-}
-table.insert(testPairBus, { ch = netCtrl.pairChannel, pkt = pairAck })
-
--- Controller receives pair_ack
-local cAck = netCtrl:pullMessage()
-assertTrue(Crypto.verifySignature(workerPairCode, "pair_ack:5:" .. wNonce .. ":" .. cNonce, cAck.sig), "Controller verified pair_ack signature")
-local derivedKeyController = Crypto.kdf(workerPairCode, cNonce .. wNonce, "minerhaven_session_v1", 32)
-assertEq(derivedKeyWorker, derivedKeyController, "Controller and Worker derived identical cryptographic session key")
 
 -- 13.4 Authoritative Scan Radius Enforcement
 -- Create Controller with scanRadius = 12
@@ -1445,143 +1447,347 @@ assertEq(testWorker.phase, "UNPAIRED", "Worker phase set to UNPAIRED")
 assertTrue(testWorker.unpairedRequested, "Worker unpairRequested flag set to return to pairing mode")
 
 -- Test Dashboard dynamic button integration and command handling
-local Dashboard = dofile("controller/dashboard.lua")
-local mockDashboardCtrl = {
-    config = { scanRadius = 12, running = false },
-    workers = {
-        [7] = {
-            id = 7,
-            name = "Turtle 7",
-            telemetry = { phase = "Idle", x = 1, y = 2, z = 3, fuel = 500, usedSlots = 2 },
-            lastSeen = 100,
-        }
-    },
-    ores = { turtleOffset = { x = 1, y = 0, z = 1, calibrated = true } },
-    lastScanOres = 0,
-    batchesSent = 0,
-    lastLog = "",
-    setWorkerHomeCalled = nil,
-    unpairWorkerCalled = nil,
-    setWorkerHome = function(self, id) self.setWorkerHomeCalled = id end,
-    unpairWorker = function(self, id) self.unpairWorkerCalled = id end,
-}
-local testDash = Dashboard.new(mockDashboardCtrl)
-testDash:render()
-assertTrue(#testDash.dynamicButtons >= 2, "Dynamic buttons generated for worker")
-local hasHomeBtn, hasUnpairBtn = false, false
-for _, btn in ipairs(testDash.dynamicButtons) do
-    if btn.action == "sethome" and btn.workerId == 7 then hasHomeBtn = true end
-    if btn.action == "unpair" and btn.workerId == 7 then hasUnpairBtn = true end
-end
-assertTrue(hasHomeBtn, "Dashboard rendered [SET HOME] dynamic button for worker 7")
-assertTrue(hasUnpairBtn, "Dashboard rendered [UNPAIR] dynamic button for worker 7")
-
--- Test dashboard mouse click on dynamic buttons
-for _, btn in ipairs(testDash.dynamicButtons) do
-    if btn.action == "sethome" then
-        testDash:handleMouseClick(1, btn.x1, btn.y)
+do
+    local Dashboard = dofile("controller/dashboard.lua")
+    local mockDashboardCtrl = {
+        config = { scanRadius = 12, running = false },
+        workers = {
+            [7] = {
+                id = 7,
+                name = "Turtle 7",
+                telemetry = { phase = "Idle", x = 1, y = 2, z = 3, fuel = 500, usedSlots = 2 },
+                lastSeen = 100,
+            }
+        },
+        ores = { turtleOffset = { x = 1, y = 0, z = 1, calibrated = true } },
+        lastScanOres = 0,
+        batchesSent = 0,
+        lastLog = "",
+        setWorkerHomeCalled = nil,
+        unpairWorkerCalled = nil,
+        setWorkerHome = function(self, id) self.setWorkerHomeCalled = id end,
+        unpairWorker = function(self, id) self.unpairWorkerCalled = id end,
+    }
+    local testDash = Dashboard.new(mockDashboardCtrl)
+    testDash:render()
+    assertTrue(#testDash.dynamicButtons >= 2, "Dynamic buttons generated for worker")
+    local hasHomeBtn, hasUnpairBtn = false, false
+    for _, btn in ipairs(testDash.dynamicButtons) do
+        if btn.action == "sethome" and btn.workerId == 7 then hasHomeBtn = true end
+        if btn.action == "unpair" and btn.workerId == 7 then hasUnpairBtn = true end
     end
-end
-assertEq(mockDashboardCtrl.setWorkerHomeCalled, 7, "Mouse click on [SET HOME] invoked controller:setWorkerHome")
+    assertTrue(hasHomeBtn, "Dashboard rendered [SET HOME] dynamic button for worker 7")
+    assertTrue(hasUnpairBtn, "Dashboard rendered [UNPAIR] dynamic button for worker 7")
 
-for _, btn in ipairs(testDash.dynamicButtons) do
-    if btn.action == "unpair" then
-        testDash:handleMouseClick(1, btn.x1, btn.y)
+    -- Test dashboard mouse click on dynamic buttons
+    for _, btn in ipairs(testDash.dynamicButtons) do
+        if btn.action == "sethome" then
+            testDash:handleMouseClick(1, btn.x1, btn.y)
+        end
     end
-end
-assertEq(mockDashboardCtrl.unpairWorkerCalled, 7, "Mouse click on [UNPAIR] invoked controller:unpairWorker")
+    assertEq(mockDashboardCtrl.setWorkerHomeCalled, 7, "Mouse click on [SET HOME] invoked controller:setWorkerHome")
 
--- Test CLI commands: sethome and unpair
-testDash:handleCommand("sethome 7")
-assertEq(mockDashboardCtrl.setWorkerHomeCalled, 7, "Dashboard handleCommand 'sethome 7' invoked controller:setWorkerHome")
-testDash:handleCommand("unpair 7")
-assertEq(mockDashboardCtrl.unpairWorkerCalled, 7, "Dashboard handleCommand 'unpair 7' invoked controller:unpairWorker")
+    for _, btn in ipairs(testDash.dynamicButtons) do
+        if btn.action == "unpair" then
+            testDash:handleMouseClick(1, btn.x1, btn.y)
+        end
+    end
+    assertEq(mockDashboardCtrl.unpairWorkerCalled, 7, "Mouse click on [UNPAIR] invoked controller:unpairWorker")
+
+    -- Test CLI commands: sethome and unpair
+    testDash:handleCommand("sethome 7")
+    assertEq(mockDashboardCtrl.setWorkerHomeCalled, 7, "Dashboard handleCommand 'sethome 7' invoked controller:setWorkerHome")
+    testDash:handleCommand("unpair 7")
+    assertEq(mockDashboardCtrl.unpairWorkerCalled, 7, "Dashboard handleCommand 'unpair 7' invoked controller:unpairWorker")
+end
 
 -- 13.8 Stop Command, Queue Clearing, Warp Teleport & Interruption Tests
--- Test Worker refuelTo helper
-local mockFuel = 50
-local mockInv = {
-    [1] = { name = "minecraft:coal", count = 10 }
-}
-_G.turtle.getFuelLevel = function() return mockFuel end
-_G.turtle.getItemDetail = function(slot) return mockInv[slot] end
-_G.turtle.refuel = function(count)
-    local avail = mockInv[1].count
-    local take = math.min(count, avail)
-    mockInv[1].count = mockInv[1].count - take
-    mockFuel = mockFuel + (take * 80)
-    return true
-end
-testWorker:refuelTo(300)
-assertTrue(mockFuel >= 300, "refuelTo reached required target fuel")
-assertTrue(mockInv[1].count < 10, "Coal consumed to meet fuel requirement")
-
--- Test Worker:teleportHome with estimateWarpCost
-local warpedCalledWith = nil
-local deletedPointCalledWith = nil
-local savedPointCalledWith = nil
-local mockAutomataWithWarp = {
-    estimateWarpCost = function(pt) return 250 end,
-    getWarpCooldown = function() return 0 end,
-    warpToPoint = function(pt)
-        warpedCalledWith = pt
+do
+    -- Test Worker refuelTo helper
+    local mockFuel = 50
+    local mockInv = {
+        [1] = { name = "minecraft:coal", count = 10 }
+    }
+    _G.turtle.getFuelLevel = function() return mockFuel end
+    _G.turtle.getItemDetail = function(slot) return mockInv[slot] end
+    _G.turtle.refuel = function(count)
+        local avail = mockInv[1].count
+        local take = math.min(count, avail)
+        mockInv[1].count = mockInv[1].count - take
+        mockFuel = mockFuel + (take * 80)
         return true
-    end,
-    deletePoint = function(pt)
-        deletedPointCalledWith = pt
-        return true
-    end,
-    savePoint = function(pt)
-        savedPointCalledWith = pt
-        return true
-    end,
-}
-testWorker.ensureAutomata = function() return mockAutomataWithWarp, "left" end
-testWorker.home = { x = 0, y = 0, z = 0, dir = 0 }
-testWorker.pos = { x = 10, y = -20, z = 30, dir = 1 }
-local tpSuccess, tpErr = testWorker:teleportHome()
-assertTrue(tpSuccess, "Worker:teleportHome succeeded via End Automata")
-assertEq(warpedCalledWith, "home", "Warped specifically to 'home'")
-assertEq(testWorker.pos.x, 0, "Worker pos x restored to home after teleport")
-assertEq(testWorker.pos.y, 0, "Worker pos y restored to home after teleport")
-assertEq(testWorker.pos.z, 0, "Worker pos z restored to home after teleport")
-
--- Test saveHomeWarpPoint deletes before saving
-local saveWpOk = testWorker:saveHomeWarpPoint()
-assertTrue(saveWpOk, "Worker:saveHomeWarpPoint succeeded")
-assertEq(deletedPointCalledWith, "home", "saveHomeWarpPoint deleted existing point first")
-assertEq(savedPointCalledWith, "home", "saveHomeWarpPoint saved 'home' point")
-
--- Test handleCommand('stop') clears ore queue and teleports home
-testWorker.running = true
-testWorker.oreQueue = {
-    { x = 5, y = -10, z = 5, name = "minecraft:diamond_ore" },
-    { x = 8, y = -12, z = 8, name = "minecraft:iron_ore" },
-}
-testWorker.pos = { x = 5, y = -10, z = 5, dir = 0 }
-testWorker:handleCommand({ action = "stop" })
-assertEq(testWorker.running, false, "Worker stopped after 'stop' command")
-assertEq(#testWorker.oreQueue, 0, "Ore queue completely cleared upon receiving 'stop'")
-assertEq(testWorker.phase, "IDLE (Remote)", "Worker phase set to IDLE (Remote) after stopping at base")
-assertEq(testWorker.pos.x, 0, "Worker pos at home (0,0,0) after stop")
-
--- Test mineToTarget stops immediately when stop message arrives during mining steps
-testWorker.controllerId = 1
-testWorker.running = true
-testWorker.oreQueue = { { x = 20, y = -20, z = 20, name = "minecraft:ancient_debris" } }
-testWorker.pos = { x = 1, y = 0, z = 0, dir = 1 }
-local stopDelivered = false
-testWorker.net.pullMessage = function(self, timeout)
-    if not stopDelivered then
-        stopDelivered = true
-        return { type = "command", action = "stop" }, 1, self.channel
     end
-    return nil
+    testWorker:refuelTo(300)
+    assertTrue(mockFuel >= 300, "refuelTo reached required target fuel")
+    assertTrue(mockInv[1].count < 10, "Coal consumed to meet fuel requirement")
+
+    -- Test Worker:teleportHome with estimateWarpCost
+    local warpedCalledWith = nil
+    local deletedPointCalledWith = nil
+    local savedPointCalledWith = nil
+    local mockAutomataWithWarp = {
+        estimateWarpCost = function(pt) return 250 end,
+        getWarpCooldown = function() return 0 end,
+        warpToPoint = function(pt)
+            warpedCalledWith = pt
+            return true
+        end,
+        deletePoint = function(pt)
+            deletedPointCalledWith = pt
+            return true
+        end,
+        savePoint = function(pt)
+            savedPointCalledWith = pt
+            return true
+        end,
+    }
+    testWorker.ensureAutomata = function() return mockAutomataWithWarp, "left" end
+    testWorker.home = { x = 0, y = 0, z = 0, dir = 0 }
+    testWorker.pos = { x = 10, y = -20, z = 30, dir = 1 }
+    local tpSuccess, tpErr = testWorker:teleportHome()
+    assertTrue(tpSuccess, "Worker:teleportHome succeeded via End Automata")
+    assertEq(warpedCalledWith, "home", "Warped specifically to 'home'")
+    assertEq(testWorker.pos.x, 0, "Worker pos x restored to home after teleport")
+    assertEq(testWorker.pos.y, 0, "Worker pos y restored to home after teleport")
+    assertEq(testWorker.pos.z, 0, "Worker pos z restored to home after teleport")
+
+    -- Test saveHomeWarpPoint deletes before saving
+    local saveWpOk = testWorker:saveHomeWarpPoint()
+    assertTrue(saveWpOk, "Worker:saveHomeWarpPoint succeeded")
+    assertEq(deletedPointCalledWith, "home", "saveHomeWarpPoint deleted existing point first")
+    assertEq(savedPointCalledWith, "home", "saveHomeWarpPoint saved 'home' point")
+
+    -- Test handleCommand('stop') clears ore queue and teleports home
+    testWorker.running = true
+    testWorker.oreQueue = {
+        { x = 5, y = -10, z = 5, name = "minecraft:diamond_ore" },
+        { x = 8, y = -12, z = 8, name = "minecraft:iron_ore" },
+    }
+    testWorker.pos = { x = 5, y = -10, z = 5, dir = 0 }
+    testWorker:handleCommand({ action = "stop" })
+    assertEq(testWorker.running, false, "Worker stopped after 'stop' command")
+    assertEq(#testWorker.oreQueue, 0, "Ore queue completely cleared upon receiving 'stop'")
+    assertEq(testWorker.phase, "IDLE (Remote)", "Worker phase set to IDLE (Remote) after stopping at base")
+    assertEq(testWorker.pos.x, 0, "Worker pos at home (0,0,0) after stop")
+
+    -- Test mineToTarget stops immediately when stop message arrives during mining steps
+    testWorker.controllerId = 1
+    testWorker.running = true
+    testWorker.oreQueue = { { x = 20, y = -20, z = 20, name = "minecraft:ancient_debris" } }
+    testWorker.pos = { x = 1, y = 0, z = 0, dir = 1 }
+    local stopDelivered = false
+    testWorker.net.pullMessage = function(self, timeout)
+        if not stopDelivered then
+            stopDelivered = true
+            return { type = "command", action = "stop" }, 1, self.channel
+        end
+        return nil
+    end
+    local mineOk, mineErr = testWorker:mineToTarget({ x = 20, y = -20, z = 20, name = "minecraft:ancient_debris" })
+    assertEq(mineOk, false, "mineToTarget returned false when stopped")
+    assertEq(mineErr, "stopped", "mineToTarget returned error 'stopped'")
+    assertEq(testWorker.running, false, "Worker stopped flag set")
+    assertEq(#testWorker.oreQueue, 0, "Ore queue cleared on stop during mineToTarget")
 end
-local mineOk, mineErr = testWorker:mineToTarget({ x = 20, y = -20, z = 20, name = "minecraft:ancient_debris" })
-assertEq(mineOk, false, "mineToTarget returned false when stopped")
-assertEq(mineErr, "stopped", "mineToTarget returned error 'stopped'")
-assertEq(testWorker.running, false, "Worker stopped flag set")
-assertEq(#testWorker.oreQueue, 0, "Ore queue cleared on stop during mineToTarget")
+
+-- 13.9 Path-Only Waste Block Placement Tests
+do
+    -- Turtle only fills the vacated air space it opened along its path!
+    local WorkerClass = dofile("worker/worker.lua")
+    local pathWorker = WorkerClass.new()
+    pathWorker.pos = { x = 0, y = 0, z = 0, dir = 2 } -- Facing South (+Z)
+    pathWorker.home = { x = 0, y = 0, z = 0, dir = 0 }
+    pathWorker.openedSpaces = {}
+
+    local turtlePlaced = {}
+    local turtleTurns = 0
+    _G.turtle.turnRight = function()
+        turtleTurns = turtleTurns + 1
+        pathWorker.pos.dir = (pathWorker.pos.dir + 1) % 4
+        return true
+    end
+    _G.turtle.turnLeft = function()
+        turtleTurns = turtleTurns + 1
+        pathWorker.pos.dir = (pathWorker.pos.dir + 3) % 4
+        return true
+    end
+    _G.turtle.forward = function() return true end
+    _G.turtle.up = function() return true end
+    _G.turtle.down = function() return true end
+    _G.turtle.detect = function() return true end
+    _G.turtle.dig = function() return true end
+    _G.turtle.place = function()
+        table.insert(turtlePlaced, "place_forward")
+        return true
+    end
+    _G.turtle.placeDown = function()
+        table.insert(turtlePlaced, "place_down")
+        return true
+    end
+    _G.turtle.placeUp = function()
+        table.insert(turtlePlaced, "place_up")
+        return true
+    end
+    _G.turtle.getItemDetail = function(slot)
+        if slot == 2 then return { name = "minecraft:cobblestone", count = 64 } end
+        return nil
+    end
+    _G.turtle.select = function(s) return true end
+
+    -- 1. Step: turtle at (0,0,0) facing South (+Z). Digs forward (0,0,1) and moves forward to (0,0,1).
+    -- Home is (0,0,0) so it must NOT place waste into home (0,0,0)!
+    pathWorker:moveForward()
+    assertEq(pathWorker.pos.z, 1, "Worker moved forward to Z=1")
+    assertTrue(pathWorker.openedSpaces["0,0,1"], "Coordinate 0,0,1 marked as opened space")
+    assertEq(#turtlePlaced, 0, "Did NOT place waste block into starting home (0,0,0)")
+
+    -- 2. Step: turtle at (0,0,1) facing South (+Z). Digs forward (0,0,2) and moves forward to (0,0,2).
+    -- Vacated space left behind was (0,0,1), which was an opened space!
+    -- So turtle should turn 180, place waste into (0,0,1), and turn back!
+    pathWorker:moveForward()
+    assertEq(pathWorker.pos.z, 2, "Worker moved forward to Z=2")
+    assertTrue(pathWorker.openedSpaces["0,0,2"], "Coordinate 0,0,2 marked as opened space")
+    assertEq(#turtlePlaced, 1, "Filled the opened space left behind (0,0,1) with waste block")
+    assertEq(turtlePlaced[1], "place_forward", "Placed forward behind itself using turn 180")
+    assertEq(pathWorker.openedSpaces["0,0,1"], nil, "Opened space 0,0,1 cleared after filling")
+    assertEq(pathWorker.pos.dir, 2, "Worker direction preserved as South (+Z)")
+
+    -- 3. Step: vertical moves
+    -- Turtle moves up (+Y) into opened space: left behind is below -> placeDown
+    pathWorker.openedSpaces["0,0,2"] = true
+    pathWorker.pos = { x = 0, y = 0, z = 2, dir = 2 }
+    _G.turtle.detectUp = function() return true end
+    _G.turtle.digUp = function() return true end
+    pathWorker:moveUp()
+    assertEq(pathWorker.pos.y, 1, "Worker moved up to Y=1")
+    assertEq(#turtlePlaced, 2, "Filled vacated space below with waste block")
+    assertEq(turtlePlaced[2], "place_down", "Placed down into vacated space below")
+end
+
+-- 13.10 Updater, Side Flashing, and OTA Update Tests
+do
+    local Updater = dofile("controller/lib/updater/main.lua")
+
+    -- Test Semantic Version Comparison
+    assertEq(Updater.compareVersions("1.1.0", "1.0.0"), 1, "1.1.0 is newer than 1.0.0")
+    assertEq(Updater.compareVersions("1.0.0", "1.1.0"), -1, "1.0.0 is older than 1.1.0")
+    assertEq(Updater.compareVersions("1.0.0", "1.0.0"), 0, "1.0.0 is equal to 1.0.0")
+    assertEq(Updater.compareVersions("v1.2.0", "1.1.9"), 1, "v prefix stripped correctly")
+    assertEq(Updater.compareVersions("2.0.0", "1.9.9"), 1, "Major version takes precedence")
+
+    -- Test Worker Firmware Loading
+    local loadedFw = Updater.loadWorkerFirmware()
+    assertTrue(type(loadedFw) == "table", "loadWorkerFirmware returns table")
+
+    -- Test Flash Side with Disk Drive
+    local mockDrive = {
+        isDiskPresent = function() return true end,
+        getMountPath = function() return "mock_disk" end,
+    }
+    _G.peripheral.isPresent = function(s) return s == "right" or s == "left" end
+    _G.peripheral.getType = function(s)
+        if s == "right" then return "drive" end
+        if s == "left" then return "turtle" end
+        return nil
+    end
+    _G.peripheral.wrap = function(s)
+        if s == "right" then return mockDrive end
+        if s == "left" then return { getID = function() return 9 end, turnOn = function() return true end } end
+        return nil
+    end
+
+    -- Stage a dummy worker firmware for flash test
+    _G.fs.makeDir("firmware/worker")
+    local fTest = _G.fs.open("firmware/worker/startup.lua", "w")
+    if fTest then
+        fTest.write("-- Test worker startup")
+        fTest.close()
+    end
+
+    local flashDiskOk, flashDiskMsg = Updater.flashSide("right", "firmware/worker")
+    assertTrue(flashDiskOk, "flashSide succeeded for disk drive on 'right'")
+    assertTrue(flashDiskMsg:find("Flashed", 1, true) ~= nil, "Flash message reports success")
+    assertTrue(_G.fs.exists("mock_disk/startup.lua"), "Worker firmware was written to floppy disk mount")
+
+    -- Test Flash Side with Adjacent Turtle/Computer
+    local flashCompOk, flashCompMsg = Updater.flashSide("left", "firmware/worker")
+    assertTrue(flashCompOk, "flashSide succeeded for adjacent turtle on 'left'")
+    assertTrue(flashCompMsg:find("Turned on adjacent turtle", 1, true) ~= nil, "Turtle side flash turned on adjacent turtle")
+
+    -- Test sendOTAUpdate over Workernet
+    local otaSentTarget = nil
+    local otaSentPayload = nil
+    local mockOtaNet = {
+        send = function(self, targetId, payload)
+            otaSentTarget = targetId
+            otaSentPayload = payload
+            return true
+        end
+    }
+    local otaOk, otaMsg = Updater.sendOTAUpdate(mockOtaNet, 7, "firmware/worker")
+    assertTrue(otaOk, "sendOTAUpdate returned true")
+    assertEq(otaSentTarget, 7, "OTA sent to target worker 7")
+    assertEq(otaSentPayload.type, "command", "OTA packet is a command")
+    assertEq(otaSentPayload.action, "ota_update", "OTA packet action is ota_update")
+    assertTrue(type(otaSentPayload.files) == "table", "OTA packet contains firmware files")
+
+    -- Test Worker:handleCommand({ action = "ota_update" }) staging and applying
+    local rebootCalled = false
+    _G.os.reboot = function() rebootCalled = true end
+    local WorkerClass = dofile("worker/worker.lua")
+    local workerOta = WorkerClass.new()
+    workerOta.controllerId = 1
+    local testOtaPayload = {
+        action = "ota_update",
+        version = "1.2.0",
+        files = {
+            ["worker/version_ota.txt"] = "v1.2.0-test",
+        }
+    }
+    workerOta:handleCommand(testOtaPayload)
+    assertTrue(_G.fs.exists("worker/version_ota.txt"), "Worker applied staged OTA update file")
+    local fCheck = _G.fs.open("worker/version_ota.txt", "r")
+    local fCheckContent = fCheck and fCheck.readAll()
+    if fCheck then fCheck.close() end
+    assertEq(fCheckContent, "v1.2.0-test", "OTA updated file content matches")
+    assertTrue(rebootCalled, "Worker initiated reboot after OTA update")
+
+    -- Test Dashboard [OTA] button and CLI 'ota' and 'flash' commands
+    local Dashboard = dofile("controller/dashboard.lua")
+    local mockDashboardCtrl2 = {
+        config = { scanRadius = 12, running = false },
+        workers = {
+            [9] = {
+                id = 9,
+                name = "Turtle 9",
+                telemetry = { phase = "Idle", x = 0, y = 0, z = 0, fuel = 1000, usedSlots = 0 },
+                lastSeen = 100,
+            }
+        },
+        ores = { turtleOffset = { x = 1, y = 0, z = 1, calibrated = true } },
+        lastScanOres = 0,
+        batchesSent = 0,
+        lastLog = "",
+        net = mockOtaNet,
+    }
+    local testDash2 = Dashboard.new(mockDashboardCtrl2)
+    testDash2:render()
+
+    local hasOtaBtn = false
+    for _, btn in ipairs(testDash2.dynamicButtons) do
+        if btn.action == "ota" and btn.workerId == 9 then
+            hasOtaBtn = true
+            testDash2:handleMouseClick(1, btn.x1, btn.y)
+        end
+    end
+    assertTrue(hasOtaBtn, "Dashboard rendered [OTA] dynamic button for worker 9")
+    assertEq(otaSentTarget, 9, "Clicking [OTA] sent OTA update payload to worker 9")
+
+    -- Test Dashboard CLI commands: 'ota 9' and 'flash right'
+    testDash2:handleCommand("ota 9")
+    assertTrue(mockDashboardCtrl2.lastLog:find("OTA update payload", 1, true) ~= nil, "CLI 'ota 9' sent OTA")
+    testDash2:handleCommand("flash right")
+    assertTrue(mockDashboardCtrl2.lastLog:find("Flashed", 1, true) ~= nil, "CLI 'flash right' flashed side")
+end
 
 print(("ALL %d ASSERTIONS PASSED!"):format(passed))

@@ -14,6 +14,7 @@ local function loadFile(path)
 end
 
 local PairingHandler = loadFile("controller/pairing.lua")
+local Updater = loadFile("controller/lib/updater/main.lua")
 
 function Dashboard.new(controller)
     local self = setmetatable({}, Dashboard)
@@ -99,12 +100,14 @@ function Dashboard:render()
         drawText(2, y, "Position   : ", labelFg, bgCol)
         drawText(15, y, string.format("(%+d, %+d, %+d)", tel.x or 0, tel.y or 0, tel.z or 0), valFg, bgCol)
 
-        -- Dynamic per-worker buttons: [SET HOME] [UNPAIR]
+        -- Dynamic per-worker buttons: [SET HOME] [UNPAIR] [OTA]
         local btnHomeText = "[SET HOME]"
         local btnUnpairText = "[UNPAIR]"
-        if w >= 48 then
-            local btnHomeX = 28
-            local btnUnpairX = 39
+        local btnOtaText = "[OTA]"
+        if w >= 50 then
+            local btnHomeX = 25
+            local btnUnpairX = 36
+            local btnOtaX = 45
             drawText(btnHomeX, y, btnHomeText, btnFg, btnBg)
             table.insert(self.dynamicButtons, {
                 x1 = btnHomeX,
@@ -119,12 +122,21 @@ function Dashboard:render()
                 x2 = btnUnpairX + #btnUnpairText - 1,
                 y = y,
                 action = "unpair",
+                workerId = wId,
+            })
+            drawText(btnOtaX, y, btnOtaText, colors and colors.lime or 32, btnBg)
+            table.insert(self.dynamicButtons, {
+                x1 = btnOtaX,
+                x2 = btnOtaX + #btnOtaText - 1,
+                y = y,
+                action = "ota",
                 workerId = wId,
             })
         else
             y = y + 1
             local btnHomeX = 2
-            local btnUnpairX = 14
+            local btnUnpairX = 13
+            local btnOtaX = 22
             drawText(btnHomeX, y, btnHomeText, btnFg, btnBg)
             table.insert(self.dynamicButtons, {
                 x1 = btnHomeX,
@@ -139,6 +151,14 @@ function Dashboard:render()
                 x2 = btnUnpairX + #btnUnpairText - 1,
                 y = y,
                 action = "unpair",
+                workerId = wId,
+            })
+            drawText(btnOtaX, y, btnOtaText, colors and colors.lime or 32, btnBg)
+            table.insert(self.dynamicButtons, {
+                x1 = btnOtaX,
+                x2 = btnOtaX + #btnOtaText - 1,
+                y = y,
+                action = "ota",
                 workerId = wId,
             })
         end
@@ -265,10 +285,59 @@ function Dashboard:handleCommand(cmd)
         else
             self.controller.lastLog = "Usage: unpair <workerId>"
         end
+    elseif root == "ota" then
+        local targetId = tonumber(parts[2]) or parts[2]
+        if not targetId then
+            local count = 0
+            local onlyId = nil
+            for id, _ in pairs(self.controller.workers) do
+                count = count + 1
+                onlyId = id
+            end
+            if count == 1 then targetId = onlyId end
+        end
+        if targetId then
+            self.controller.lastLog = "Sending OTA update to Worker " .. tostring(targetId) .. "..."
+            self:render()
+            local ok, msg = Updater.sendOTAUpdate(self.controller.net, targetId)
+            self.controller.lastLog = msg
+        else
+            local sent = 0
+            for id, _ in pairs(self.controller.workers) do
+                Updater.sendOTAUpdate(self.controller.net, id)
+                sent = sent + 1
+            end
+            self.controller.lastLog = string.format("Broadcasted OTA update to %d worker(s).", sent)
+        end
+    elseif root == "flash" then
+        local side = parts[2] or "right"
+        self.controller.lastLog = "Flashing worker firmware to " .. side .. "..."
+        self:render()
+        local ok, msg = Updater.flashSide(side)
+        self.controller.lastLog = msg
+    elseif root == "update" then
+        self.controller.lastLog = "Checking GitHub Releases for updates..."
+        self:render()
+        local hasUpdate, latestVer, currVer = Updater.checkForUpdates()
+        if hasUpdate then
+            self.controller.lastLog = "Updating to v" .. tostring(latestVer) .. "..."
+            self:render()
+            local ok, err = Updater.updateController()
+            if ok then
+                self.controller.lastLog = "Update succeeded! Rebooting in 2s..."
+                self:render()
+                if os.sleep then os.sleep(2) end
+                if os.reboot then os.reboot() end
+            else
+                self.controller.lastLog = "Update failed: " .. tostring(err)
+            end
+        else
+            self.controller.lastLog = "System is already on latest version (v" .. tostring(currVer) .. ")"
+        end
     elseif root == "quit" or root == "exit" then
         return "quit"
     else
-        self.controller.lastLog = "Commands: start, stop, scan, rad <r>, sethome [id], unpair [id], pair, quit"
+        self.controller.lastLog = "Commands: start, stop, scan, rad <r>, sethome [id], unpair [id], ota [id], flash <side>, update, quit"
     end
 end
 
@@ -290,6 +359,11 @@ function Dashboard:handleMouseClick(button, x, y)
                 self.controller:setWorkerHome(btn.workerId)
             elseif btn.action == "unpair" then
                 self.controller:unpairWorker(btn.workerId)
+            elseif btn.action == "ota" then
+                self.controller.lastLog = "Sending OTA update to Worker " .. tostring(btn.workerId) .. "..."
+                self:render()
+                local ok, msg = Updater.sendOTAUpdate(self.controller.net, btn.workerId)
+                self.controller.lastLog = msg
             end
             return
         end

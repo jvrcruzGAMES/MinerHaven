@@ -48,6 +48,32 @@ local function coordKey(x, y, z)
     return string.format("%d,%d,%d", math.floor(x or 0), math.floor(y or 0), math.floor(z or 0))
 end
 
+local function combinePath(base, rel)
+    if fs and fs.combine then return fs.combine(base, rel) end
+    if not base or base == "" then return rel:gsub("^/+", "") end
+    return (base:gsub("/+$", "") .. "/" .. rel:gsub("^/+", ""))
+end
+
+local function getDirPath(path)
+    if fs and fs.getDir then return fs.getDir(path) end
+    return path:match("^(.-)/[^/]+$") or ""
+end
+
+local function copyFile(src, dest)
+    if fs and fs.copy then
+        return pcall(fs.copy, src, dest)
+    end
+    local fIn = fs.open(src, "r")
+    if not fIn then return false end
+    local data = fIn.readAll()
+    fIn.close()
+    local fOut = fs.open(dest, "w")
+    if not fOut then return false end
+    fOut.write(data)
+    fOut.close()
+    return true
+end
+
 function Worker.new(opts)
     opts = opts or {}
     local self = setmetatable({}, Worker)
@@ -70,6 +96,7 @@ function Worker.new(opts)
 
     self.oreQueue = {}
     self.blockedCoords = {}
+    self.openedSpaces = {}
     self.minedItems = {}
     self.energyItems = {
         ["mekanism:basic_energy_cube"] = true,
@@ -436,15 +463,58 @@ function Worker:selectWasteBlock()
     return false
 end
 
-function Worker:placeWasteBehind()
-    if not turtle or not turtle.placeUp then return false end
-    if self:selectWasteBlock() then
-        -- Prefer placing down or up
-        local okDown = turtle.placeDown()
-        if not okDown then turtle.placeUp() end
-        turtle.select(1)
+function Worker:fillOpenedSpaceBehind(prevX, prevY, prevZ, moveType)
+    if not turtle then return false end
+    if not prevX or not prevY or not prevZ then return false end
+
+    local key = coordKey(prevX, prevY, prevZ)
+    -- Only fill space that was explicitly opened by the turtle's dig path!
+    if not self.openedSpaces or not self.openedSpaces[key] then
+        return false
+    end
+
+    -- Never fill base / home coordinate (0,0,0) or configured home
+    if (prevX == 0 and prevY == 0 and prevZ == 0) or
+       (prevX == self.home.x and prevY == self.home.y and prevZ == self.home.z) then
+        self.openedSpaces[key] = nil
+        return false
+    end
+
+    if not self:selectWasteBlock() then
+        return false
+    end
+
+    local placed = false
+    if moveType == "forward" then
+        -- Turned around to fill the vacated space behind
+        if turtle.turnRight and turtle.place then
+            self:turnRight()
+            self:turnRight()
+            placed = turtle.place()
+            self:turnRight()
+            self:turnRight()
+        end
+    elseif moveType == "up" then
+        -- Moved up (+Y), vacated space is directly below (-Y)
+        if turtle.placeDown then
+            placed = turtle.placeDown()
+        end
+    elseif moveType == "down" then
+        -- Moved down (-Y), vacated space is directly above (+Y)
+        if turtle.placeUp then
+            placed = turtle.placeUp()
+        end
+    end
+
+    if turtle.select then turtle.select(1) end
+    if placed then
+        self.openedSpaces[key] = nil
         return true
     end
+    return false
+end
+
+function Worker:placeWasteBehind()
     return false
 end
 
@@ -485,6 +555,18 @@ function Worker:digBlock(dirStr)
     local suckFn = (dirStr == "up" and turtle.suckUp) or (dirStr == "down" and turtle.suckDown) or turtle.suck
     local inspectFn = (dirStr == "up" and turtle.inspectUp) or (dirStr == "down" and turtle.inspectDown) or turtle.inspect
 
+    -- Target block coordinate
+    local bx, by, bz = self.pos.x, self.pos.y, self.pos.z
+    if dirStr == "up" then
+        by = by + 1
+    elseif dirStr == "down" then
+        by = by - 1
+    else
+        local vec = DIR_VECTORS[self.pos.dir or 0] or { x = 0, z = -1 }
+        bx = bx + vec.x
+        bz = bz + vec.z
+    end
+
     -- If no block is present in that direction, nothing to dig!
     if detectFn and not detectFn() then
         return true
@@ -498,11 +580,19 @@ function Worker:digBlock(dirStr)
         end
     end
 
+    -- Helper to record opened space on successful destruction of a solid block
+    local function recordOpenedSpace()
+        if self.openedSpaces then
+            self.openedSpaces[coordKey(bx, by, bz)] = true
+        end
+    end
+
     -- 1. Try native CC dig if turtle tool happens to be available
     local nativeDigFn = (dirStr == "up" and turtle.digUp) or (dirStr == "down" and turtle.digDown) or turtle.dig
     if nativeDigFn then
         local ok = nativeDigFn()
         if ok or (detectFn and not detectFn()) then
+            recordOpenedSpace()
             if suckFn then pcall(suckFn) end
             return true
         end
@@ -546,11 +636,13 @@ function Worker:digBlock(dirStr)
 
         -- Check if block was destroyed (handles AP 0.8.2a awardStat NPE where block was destroyed before exception)
         if detectFn and not detectFn() then
+            recordOpenedSpace()
             if turtle and turtle.select then turtle.select(prevSlot) end
             return true
         end
 
         if ok and res == true then
+            recordOpenedSpace()
             if turtle and turtle.select then turtle.select(prevSlot) end
             return true
         end
@@ -574,13 +666,18 @@ function Worker:digBlock(dirStr)
     end
 
     if turtle and turtle.select then turtle.select(prevSlot) end
-    return (detectFn and not detectFn())
+    if detectFn and not detectFn() then
+        recordOpenedSpace()
+        return true
+    end
+    return false
 end
 
 function Worker:moveForward()
     self:refuelIfNeeded()
     local vec = DIR_VECTORS[self.pos.dir or 0] or { x = 0, z = -1 }
-    local nx, ny, nz = self.pos.x + vec.x, self.pos.y, self.pos.z + vec.z
+    local prevX, prevY, prevZ = self.pos.x, self.pos.y, self.pos.z
+    local nx, ny, nz = prevX + vec.x, prevY, prevZ + vec.z
 
     if self:isBlocked(nx, ny, nz) then return false, "blocked_coordinate" end
 
@@ -592,7 +689,7 @@ function Worker:moveForward()
     if turtle.forward() then
         self.pos.x, self.pos.z = nx, nz
         self:savePos()
-        self:placeWasteBehind()
+        self:fillOpenedSpaceBehind(prevX, prevY, prevZ, "forward")
         return true
     end
 
@@ -602,7 +699,7 @@ function Worker:moveForward()
         if turtle.forward() then
             self.pos.x, self.pos.z = nx, nz
             self:savePos()
-            self:placeWasteBehind()
+            self:fillOpenedSpaceBehind(prevX, prevY, prevZ, "forward")
             return true
         end
     end
@@ -611,7 +708,8 @@ end
 
 function Worker:moveDown()
     self:refuelIfNeeded()
-    local nx, ny, nz = self.pos.x, self.pos.y - 1, self.pos.z
+    local prevX, prevY, prevZ = self.pos.x, self.pos.y, self.pos.z
+    local nx, ny, nz = prevX, prevY - 1, prevZ
     if self:isBlocked(nx, ny, nz) then return false, "blocked_coordinate" end
 
     if turtle.detectDown and turtle.detectDown() then
@@ -622,7 +720,7 @@ function Worker:moveDown()
     if turtle.down() then
         self.pos.y = ny
         self:savePos()
-        self:placeWasteBehind()
+        self:fillOpenedSpaceBehind(prevX, prevY, prevZ, "down")
         return true
     end
 
@@ -631,7 +729,7 @@ function Worker:moveDown()
         if turtle.down() then
             self.pos.y = ny
             self:savePos()
-            self:placeWasteBehind()
+            self:fillOpenedSpaceBehind(prevX, prevY, prevZ, "down")
             return true
         end
     end
@@ -640,7 +738,8 @@ end
 
 function Worker:moveUp()
     self:refuelIfNeeded()
-    local nx, ny, nz = self.pos.x, self.pos.y + 1, self.pos.z
+    local prevX, prevY, prevZ = self.pos.x, self.pos.y, self.pos.z
+    local nx, ny, nz = prevX, prevY + 1, prevZ
     if self:isBlocked(nx, ny, nz) then return false, "blocked_coordinate" end
 
     if turtle.detectUp and turtle.detectUp() then
@@ -651,7 +750,7 @@ function Worker:moveUp()
     if turtle.up() then
         self.pos.y = ny
         self:savePos()
-        self:placeWasteBehind()
+        self:fillOpenedSpaceBehind(prevX, prevY, prevZ, "up")
         return true
     end
 
@@ -660,7 +759,7 @@ function Worker:moveUp()
         if turtle.up() then
             self.pos.y = ny
             self:savePos()
-            self:placeWasteBehind()
+            self:fillOpenedSpaceBehind(prevX, prevY, prevZ, "up")
             return true
         end
     end
@@ -960,6 +1059,61 @@ function Worker:handleCommand(payload)
         Device.unpair()
         self.controllerId = nil
         self.unpairedRequested = true
+    elseif action == "ota_update" then
+        self.running = false
+        self.oreQueue = {}
+        self.phase = "UPDATING (OTA)"
+        self.lastAction = "Applying OTA firmware update..."
+        self:renderHeadlessUI()
+        self:sendTelemetry()
+
+        local files = payload.files or {}
+        local stagingDir = ".staging"
+        if fs.exists(stagingDir) and fs.delete then pcall(fs.delete, stagingDir) end
+        if fs.makeDir then fs.makeDir(stagingDir) end
+
+        local fileCount = 0
+        local writeErr = nil
+        for relPath, content in pairs(files) do
+            local stagedPath = combinePath(stagingDir, relPath)
+            local sDir = getDirPath(stagedPath)
+            if sDir and sDir ~= "" and not fs.exists(sDir) and fs.makeDir then fs.makeDir(sDir) end
+            local f = fs.open(stagedPath, "w")
+            if f then
+                f.write(content)
+                f.close()
+                fileCount = fileCount + 1
+            else
+                writeErr = "Failed to write staged file: " .. tostring(relPath)
+                break
+            end
+        end
+
+        if writeErr or fileCount == 0 then
+            self.lastAction = "OTA update failed: " .. tostring(writeErr or "no files received")
+            self.phase = "IDLE (Remote)"
+            self:renderHeadlessUI()
+            self:sendTelemetry()
+            return
+        end
+
+        -- Staging succeeded: replace files
+        for relPath, _ in pairs(files) do
+            local destPath = relPath
+            local destDir = getDirPath(destPath)
+            if destDir and destDir ~= "" and not fs.exists(destDir) and fs.makeDir then fs.makeDir(destDir) end
+            local stagedPath = combinePath(stagingDir, relPath)
+            if fs.exists(destPath) and fs.delete then pcall(fs.delete, destPath) end
+            copyFile(stagedPath, destPath)
+        end
+        if fs.delete then pcall(fs.delete, stagingDir) end
+
+        self.lastAction = string.format("OTA update complete (%d files). Rebooting...", fileCount)
+        self:renderHeadlessUI()
+        self:sendTelemetry()
+        if os.sleep then os.sleep(1) end
+        if os.reboot then os.reboot() end
+        return
     end
     self:renderHeadlessUI()
     self:sendTelemetry()

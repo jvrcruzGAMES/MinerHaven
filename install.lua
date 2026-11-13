@@ -194,6 +194,7 @@ local files = {
     { remote = "lib/crypto/main.lua", dest = joinPath(targetDir, "lib/crypto/main.lua") },
     { remote = "lib/workernet/main.lua", dest = joinPath(targetDir, "lib/workernet/main.lua") },
     { remote = "startup.lua", dest = joinPath(targetDir, "startup.lua") },
+    { remote = "version.json", dest = joinPath(targetDir, "version.json") },
 }
 
 if isController then
@@ -204,6 +205,25 @@ if isController then
     table.insert(files, { remote = "controller/main.cfg", dest = joinPath(targetDir, "controller/main.cfg") })
     table.insert(files, { remote = "controller/lib/ores/main.lua", dest = joinPath(targetDir, "controller/lib/ores/main.lua") })
     table.insert(files, { remote = "controller/lib/pairing/main.lua", dest = joinPath(targetDir, "controller/lib/pairing/main.lua") })
+    table.insert(files, { remote = "controller/lib/updater/main.lua", dest = joinPath(targetDir, "controller/lib/updater/main.lua") })
+
+    -- Bundle worker firmware locally into firmware/worker/
+    local workerFirmware = {
+        "startup.lua",
+        "lib/crypto/main.lua",
+        "lib/workernet/main.lua",
+        "worker/main.lua",
+        "worker/pairing.lua",
+        "worker/worker.lua",
+        "worker/lib/device/main.lua",
+        "version.json",
+    }
+    for _, rel in ipairs(workerFirmware) do
+        table.insert(files, {
+            remote = rel,
+            dest = joinPath(targetDir, "firmware/worker/" .. rel),
+        })
+    end
 elseif isWorker then
     table.insert(files, { remote = "worker/main.lua", dest = joinPath(targetDir, "worker/main.lua") })
     table.insert(files, { remote = "worker/pairing.lua", dest = joinPath(targetDir, "worker/pairing.lua") })

@@ -12,19 +12,23 @@ MinerHaven is structured around a **Controller & Headless Worker** architecture 
 MinerHaven/
 ├── startup.lua                  # Universal startup script; launches installed component
 ├── install.lua                  # Automated remote installer
+├── version.json                 # Semantic version & release manifests
+├── firmware/                    # Bundled firmware cache
+│   └── worker/                  # Bundled worker firmware for flashing & OTA
 ├── controller/                  # Base Advanced Computer (Home Base)
-│   ├── main.lua                 # Controller entry point
-│   ├── dashboard.lua            # Real-time TUI dashboard & command terminal
+│   ├── main.lua                 # Controller entry point (runs startup update checks)
+│   ├── dashboard.lua            # Real-time TUI dashboard, buttons & fleet terminal
 │   ├── pairing.lua              # Controller-side pairing handler
 │   ├── controller.lua           # Core controller logic & fleet coordinator
 │   ├── main.cfg                 # Centralized configuration (authoritative radius, channels)
 │   └── lib/
 │       ├── ores/main.lua        # libores: GeoScanner management & base block protection
-│       └── pairing/main.lua     # libpairing: Fleet pairing & session key manager
+│       ├── pairing/main.lua     # libpairing: Fleet pairing & session key manager
+│       └── updater/main.lua     # libupdater: GitHub updates, side flashing, & OTA dispatch
 ├── worker/                      # Mining Turtle (Worker)
 │   ├── main.lua                 # Worker entry point (runs pairing or worker)
 │   ├── pairing.lua              # Headless pairing display (shows 6-digit numeric code)
-│   ├── worker.lua               # Headless worker logic & mining state machine
+│   ├── worker.lua               # Headless worker logic, path-only filling, & OTA receiver
 │   └── lib/
 │       └── device/main.lua      # libdevice: Worker pairing handshake & device identity
 └── lib/                         # Shared Core Libraries
@@ -58,8 +62,14 @@ MinerHaven/
    - **Emergency Return**: If coal count drops to 0 while in the field, the turtle immediately teleports home.
 8. **Protected Base Blocks**:
    - Strictly preserves base blocks: Computers, Modems, Geo Scanners, Sophisticated Storage Barrels, Energy Cubes, Flux Plugs/Points (`fluxnetworks:*`), Teleport Pads, and Bedrock.
-9. **Waste Placement**:
-   - Places waste blocks (`cobblestone`, `netherrack`, `dirt`, `stone`) behind in its path.
+9. **Path-Only Waste Placement**:
+   - The worker tracks the exact coordinates it breaks open. When advancing along an excavation path, it turns around and fills only the vacated air space left behind with waste blocks (`cobblestone`, `netherrack`, `dirt`, `stone`).
+   - Untouched cave walls, floors, ceilings, and home coordinates are never covered or obstructed.
+10. **Device Architecture Upgrade - Flashing & OTA Updates (`libupdater`)**:
+   - **Side Flashing (`flash <side>`)**: The controller can flash worker firmware directly to an adjacent disk drive (writes bootable floppy files to `/disk`) or power on and bootstrap an adjacent computer/turtle.
+   - **Over-The-Air (OTA) Updates (`ota [workerId]` / `[OTA]` Button)**: The controller pushes the complete worker firmware payload over encrypted Workernet. The worker stages files into `.staging/`, replaces the local installation, and reboots cleanly.
+   - **Controller GitHub Releases Update System**: On startup, the controller queries GitHub Releases (`/releases/latest` or `version.json`), notifying the operator if a newer version is available with a `(Y/n)` prompt. Manual updates can also be triggered at any time via the `update` command.
+   - **Bundled Worker Firmware**: Installing or upgrading the controller automatically bundles the latest worker firmware in `firmware/worker/` for instant flashing and OTA deployment.
 
 ---
 
