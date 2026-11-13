@@ -277,7 +277,6 @@ function Manager:scanAuthoritative(radius)
                 y = relY,
                 z = relZ,
                 dist = distFromHome,
-                tags = b.tags,
             })
         end
     end

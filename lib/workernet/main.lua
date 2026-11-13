@@ -23,31 +23,49 @@ Workernet.PROTOCOL_VERSION = 1
 
 local function serialize(val)
     if type(textutils) == "table" and textutils.serialize then
-        return textutils.serialize(val, { compact = true })
-    end
-    -- Fallback serializer for plain Lua testing environments
-    local t = type(val)
-    if t == "number" or t == "boolean" then
-        return tostring(val)
-    elseif t == "string" then
-        return string.format("%q", val)
-    elseif t == "table" then
-        local parts = {}
-        for k, v in pairs(val) do
-            local kStr
-            if type(k) == "string" and k:match("^[%a_][%w_]*$") then
-                kStr = k
-            else
-                kStr = "[" .. serialize(k) .. "]"
-            end
-            table.insert(parts, kStr .. "=" .. serialize(v))
+        local ok, res = pcall(textutils.serialize, val, { compact = true, allow_repetitions = true })
+        if ok and type(res) == "string" then
+            return res
         end
-        return "{" .. table.concat(parts, ",") .. "}"
-    elseif t == "nil" then
-        return "nil"
-    else
-        error("Unsupported serialization type: " .. t)
+        local ok2, res2 = pcall(textutils.serialize, val, { compact = true })
+        if ok2 and type(res2) == "string" then
+            return res2
+        end
     end
+
+    -- Fallback serializer supporting repeated table references without crashing
+    local seen = {}
+    local function serializeVal(v)
+        local t = type(v)
+        if t == "number" or t == "boolean" then
+            return tostring(v)
+        elseif t == "string" then
+            return string.format("%q", v)
+        elseif t == "table" then
+            if seen[v] then
+                return "{}" -- break circular reference
+            end
+            seen[v] = true
+            local parts = {}
+            for k, item in pairs(v) do
+                local kStr
+                if type(k) == "string" and k:match("^[%a_][%w_]*$") then
+                    kStr = k
+                else
+                    kStr = "[" .. serializeVal(k) .. "]"
+                end
+                table.insert(parts, kStr .. "=" .. serializeVal(item))
+            end
+            seen[v] = nil -- allow non-circular shared references
+            return "{" .. table.concat(parts, ",") .. "}"
+        elseif t == "nil" then
+            return "nil"
+        else
+            return "nil"
+        end
+    end
+
+    return serializeVal(val)
 end
 
 local function unserialize(str)

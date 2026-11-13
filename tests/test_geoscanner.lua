@@ -1237,6 +1237,20 @@ assertEq(unpacked.text, "secure payload", "decrypted payload match")
 local _, _, repErr = nodeB:unpackPacket(pkt)
 assertTrue(repErr and repErr:match("Replay"), "detected replay attack on duplicate sequence")
 
+-- Repeated table serialization test (ensures CC textutils repeated entries does not crash)
+local sharedTag = { "forge:ores" }
+local repeatedPayload = {
+    type = "ore_batch",
+    ores = {
+        { name = "iron", tags = sharedTag },
+        { name = "gold", tags = sharedTag },
+    }
+}
+local serStr = Workernet.serialize(repeatedPayload)
+assertTrue(type(serStr) == "string" and #serStr > 0, "Workernet.serialize succeeds with repeated entries")
+local deser = Workernet.unserialize(serStr)
+assertEq(#deser.ores, 2, "Workernet.unserialize recovers repeated entries")
+
 -- 13.3 6-Digit Numeric Pairing Handshake
 local testPairBus = {}
 local makePairModem = function(id)
