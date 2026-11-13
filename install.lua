@@ -1,11 +1,13 @@
---- MinerHaven Installer for CC: Tweaked
+--- MinerHaven Installer for CC: Tweaked (2-Computer Strategy)
 -- Run directly in CraftOS:
 --   wget run https://raw.githubusercontent.com/jvrcruzGAMES/MinerHaven/main/install.lua
 --
 -- Options:
---   --turtle         Install with Turtle Auto-Miner & Home setup
---   --no-turtle      Install standard Computer/Pocket version without prompting
+--   --base           Install for the Base Advanced Computer (Geo Scanner + Ender Modem)
+--   --turtle         Install for the Mining / End Automata Turtle (with Home setup)
+--   --no-turtle      Alias for --base
 --   --set-home       Automatically save current turtle position as Home without prompting
+--   --facing <dir>   Set Turtle facing direction (n/e/s/w, default: n)
 --   --lib-only       Only install the reusable /lib/geoscanner.lua library
 --   --dir <folder>   Install into a custom directory (default: /)
 --   --branch <name>  Git branch to download from (default: main)
@@ -19,8 +21,8 @@ local libOnly = false
 local targetDir = ""
 local branch = "main"
 local autoStartup = false
-local isTurtleInstall = nil -- nil = ask interactively
-local setHomePref = nil     -- nil = ask interactively when turtle install is selected
+local installRole = nil -- "base" | "turtle" | nil (ask interactively)
+local setHomePref = nil -- nil = ask interactively when turtle install is selected
 local facingArg = nil
 
 local i = 1
@@ -31,9 +33,9 @@ while i <= #args do
     elseif a == "--startup" then
         autoStartup = true
     elseif a == "--turtle" then
-        isTurtleInstall = true
-    elseif a == "--no-turtle" then
-        isTurtleInstall = false
+        installRole = "turtle"
+    elseif a == "--base" or a == "--no-turtle" then
+        installRole = "base"
     elseif a == "--set-home" then
         setHomePref = true
     elseif a == "--no-set-home" then
@@ -109,6 +111,37 @@ local function askYesNo(promptText, defaultYes)
         return false
     end
     return defaultYes
+end
+
+--- Ask the user which computer this installation is for: Base Computer or Turtle.
+local function askComputerRole()
+    local defaultRole = (_G.turtle ~= nil) and "turtle" or "base"
+    if type(_G.read) ~= "function" then
+        return defaultRole
+    end
+    local defaultHint = (defaultRole == "turtle") and " [t]" or " [b]"
+    if term and term.isColor and term.isColor() then
+        term.setTextColor(colors.yellow)
+    end
+    write("[?] Which computer is this? (b = Base Computer, t = Turtle)" .. defaultHint .. ": ")
+    if term and term.isColor and term.isColor() then
+        term.setTextColor(colors.white)
+    end
+    local input = read()
+    if type(input) ~= "string" then
+        return defaultRole
+    end
+    local trimmed = input:match("^%s*(.-)%s*$"):lower()
+    if trimmed == "" then
+        return defaultRole
+    end
+    if trimmed == "t" or trimmed == "turtle" or trimmed == "2" or trimmed == "y" or trimmed == "yes" then
+        return "turtle"
+    end
+    if trimmed == "b" or trimmed == "base" or trimmed == "c" or trimmed == "computer" or trimmed == "1" or trimmed == "n" or trimmed == "no" then
+        return "base"
+    end
+    return defaultRole
 end
 
 local function parseDir(input)
@@ -200,11 +233,13 @@ end
 
 logInfo("Starting MinerHaven installation...")
 
--- Prompt whether this installation is for a Turtle (unless specified via CLI flag or --lib-only)
-if not libOnly and isTurtleInstall == nil then
-    local defaultTurtle = (_G.turtle ~= nil)
-    isTurtleInstall = askYesNo("Is this installation for a Turtle?", defaultTurtle)
+-- Prompt whether this installation is for a Base Computer or a Turtle
+if not libOnly and installRole == nil then
+    installRole = askComputerRole()
 end
+
+local isTurtleInstall = (installRole == "turtle")
+local isBaseInstall = (installRole == "base")
 
 local files = {
     { remote = "lib/geoscanner.lua", dest = joinPath(targetDir, "lib/geoscanner.lua") },
@@ -214,6 +249,8 @@ if not libOnly then
     table.insert(files, { remote = "minerhaven.lua", dest = joinPath(targetDir, "minerhaven.lua") })
     if isTurtleInstall then
         table.insert(files, { remote = "turtle_miner.lua", dest = joinPath(targetDir, "turtle_miner.lua") })
+    elseif isBaseInstall then
+        table.insert(files, { remote = "base_computer.lua", dest = joinPath(targetDir, "base_computer.lua") })
     end
 end
 
@@ -227,8 +264,9 @@ end
 if not libOnly then
     local appPath = joinPath(targetDir, "minerhaven.lua")
     local turtleMinerPath = joinPath(targetDir, "turtle_miner.lua")
+    local baseComputerPath = joinPath(targetDir, "base_computer.lua")
 
-    -- If installing for a Turtle, ask to set current location as Home
+    -- If installing for a Turtle, ask to set current location as Home (default facing North = 0, reprogrammable)
     if isTurtleInstall then
         local shouldSetHome = setHomePref
         if shouldSetHome == nil then
@@ -297,6 +335,12 @@ if not libOnly then
                 homeFile, homeData.x, homeData.y, homeData.z
             ))
         end
+    elseif isBaseInstall then
+        local baseConfigFile = joinPath(targetDir, "base_config.cfg")
+        writeLuaConfig(baseConfigFile, {
+            running = true,
+            scanRadius = 8,
+        })
     end
 
     -- Register shell aliases for the current session
@@ -306,10 +350,13 @@ if not libOnly then
         if isTurtleInstall then
             shell.setAlias("miner", turtleMinerPath)
             shell.setAlias("turtle_miner", turtleMinerPath)
+        elseif isBaseInstall then
+            shell.setAlias("base", baseComputerPath)
+            shell.setAlias("base_computer", baseComputerPath)
         end
     end
 
-    -- Write /startup/99_minerhaven.lua script so aliases and turtle startup program load on boot
+    -- Write /startup/99_minerhaven.lua script so aliases and role service load on boot
     if not fs.exists("/startup") or fs.isDir("/startup") then
         if not fs.exists("/startup") then
             fs.makeDir("/startup")
@@ -324,10 +371,15 @@ if not libOnly then
             if isTurtleInstall then
                 h.writeLine(("    shell.setAlias('miner', %q)"):format(turtleMinerPath))
                 h.writeLine(("    shell.setAlias('turtle_miner', %q)"):format(turtleMinerPath))
+            elseif isBaseInstall then
+                h.writeLine(("    shell.setAlias('base', %q)"):format(baseComputerPath))
+                h.writeLine(("    shell.setAlias('base_computer', %q)"):format(baseComputerPath))
             end
             h.writeLine("end")
             if isTurtleInstall then
                 h.writeLine(("shell.run(%q)"):format(turtleMinerPath))
+            elseif isBaseInstall then
+                h.writeLine(("shell.run(%q)"):format(baseComputerPath))
             elseif autoStartup then
                 h.writeLine(("shell.run(%q)"):format(appPath))
             end
@@ -340,13 +392,18 @@ if not libOnly then
         print("Turtle Auto-Miner installed and configured to load on startup.")
         print("Commands:")
         print("  miner          Launch Turtle Auto-Miner screen")
-        print("  miner start    Start mining nearby ores by tag")
-        print("  miner stop     Stop mining and stay idle")
-        print("  miner sethome  Save current position as Home")
+        print("  miner start    Start mining ores passed from Base Computer")
+        print("  miner stop     Stop mining, return Home & unload to Barrel")
+        print("  miner sethome  Save current position & facing as Home")
         print("  mh             Open Geo Scanner Radar UI")
-    else
-        print("Run 'minerhaven' or 'mh' to open the Geo Scanner interface.")
-        print("Run 'mh help' for CLI commands, or require('lib.geoscanner') in your own scripts.")
+    elseif isBaseInstall then
+        print("Base Computer Controller installed and configured to load on startup.")
+        print("Commands:")
+        print("  base           Launch Base Computer screen (serves Geo Scanner ores)")
+        print("  base start     Start Turtle remotely & send ore locations")
+        print("  base stop      Stop Turtle remotely & return it to Base")
+        print("  base scan      Scan with Geo Scanner & send ores to Turtle")
+        print("  mh             Open Geo Scanner Radar UI")
     end
 else
     logSuccess("GeoScanner library installed to " .. joinPath(targetDir, "lib/geoscanner.lua"))

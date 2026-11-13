@@ -781,4 +781,234 @@ assertEq(chunkStep3, "waiting_unload", "once chunk has 0 ores left, turtle telep
 assertTrue(miner3:isAtHome(), "turtle teleported back to Home after finishing chunk")
 assertEq(miner3.chunkOresRemaining, 0, "chunkOresRemaining is 0")
 
+-- 10. Test 2-Computer Strategy (Base Advanced Computer + End Automata Turtle + Sophisticated Storage Barrel + Ender Modems):
+--     10A: Installer asks which computer it is ("b" for Base Computer) and installs /base_computer.lua
+writtenFiles = {}
+promptAnswers = { "b" }
+installChunk()
+assertTrue(writtenFiles["/base_computer.lua"] ~= nil, "installer wrote /base_computer.lua when 'b' (Base Computer) is chosen")
+assertTrue(writtenFiles["/base_config.cfg"] ~= nil, "installer wrote /base_config.cfg for Base Computer")
+assertTrue(writtenFiles["/startup/99_minerhaven.lua"]:find("base_computer.lua", 1, true) ~= nil, "startup launches base_computer.lua on Base Computer")
+
+--     10B: Verify all Base blocks are in the forbidden blocks list so the Turtle will never break its base
+assertTrue(miner3:isProtectedBlock("computercraft:computer_advanced"), "Base Advanced Computer is forbidden")
+assertTrue(miner3:isProtectedBlock("computercraft:wireless_modem_advanced"), "Ender Modem is forbidden")
+assertTrue(miner3:isProtectedBlock("advancedperipherals:geo_scanner"), "Geo Scanner is forbidden")
+assertTrue(miner3:isProtectedBlock("sophisticatedstorage:barrel"), "Sophisticated Storage Barrel is forbidden")
+assertTrue(miner3:isProtectedBlock("sophisticatedstorage:gold_barrel"), "Sophisticated Storage Gold Barrel is forbidden")
+assertTrue(miner3:isProtectedBlock("mekanism:ultimate_energy_cube"), "Energy Cube is forbidden")
+assertTrue(miner3:isProtectedBlock("allthemodium:teleport_pad"), "Teleport Pad is forbidden")
+assertTrue(miner3:isProtectedBlock("minecraft:bedrock"), "Bedrock is forbidden")
+
+--     10C: Full 2-Computer Mining Cycle over Ender Modem + Unloading into Sophisticated Storage Barrel (keeping Energy Cube)
+local baseComputerMod = assert(loadfile("./base_computer.lua"))("base_computer")
+
+-- Simulate the exact 2x2 Base setup from the screenshot:
+-- Geo Scanner at (0, 0, 0) in scanner-space:
+--   - Advanced Computer at (0, 0, 1)
+--   - Ender Modem on top of Advanced Computer at (0, 1, 1)
+--   - Sophisticated Storage Barrel at (1, 0, 0)
+--   - Advanced Turtle at Home at (1, 0, 1), facing North (dir = 0, so Barrel at (1, 0, 0) is directly North/in front of the Turtle!)
+--   - Two ores in the chunk:
+--       1) Iron Ore at scanner (1, -2, 1) -> relative to Turtle Home (1, 0, 1) this is (0, -2, 0) (2 blocks straight down!)
+--       2) Diamond Ore at scanner (2, -2, 1) -> relative to Turtle Home (1, 0, 1) this is (+1, -2, 0) (2 down, 1 East!)
+local baseScanCycle = 0
+local baseScannerPeripheral = {
+    scan = function(r)
+        baseScanCycle = baseScanCycle + 1
+        if baseScanCycle == 1 then
+            return {
+                { name = "advancedperipherals:geo_scanner", x = 0, y = 0, z = 0, tags = {} },
+                { name = "computercraft:computer_advanced", x = 0, y = 0, z = 1, tags = {} },
+                { name = "computercraft:wireless_modem_advanced", x = 0, y = 1, z = 1, tags = {} },
+                { name = "sophisticatedstorage:barrel", x = 1, y = 0, z = 0, tags = {} },
+                { name = "computercraft:turtle_advanced", x = 1, y = 0, z = 1, tags = {} },
+                { name = "minecraft:iron_ore", x = 1, y = -2, z = 1, tags = { "forge:ores" } },
+                { name = "minecraft:diamond_ore", x = 2, y = -2, z = 1, tags = { "forge:ores" } },
+            }
+        else
+            -- Second cycle: all ores in first batch were mined, now 1 gold ore appears
+            return {
+                { name = "advancedperipherals:geo_scanner", x = 0, y = 0, z = 0, tags = {} },
+                { name = "computercraft:computer_advanced", x = 0, y = 0, z = 1, tags = {} },
+                { name = "sophisticatedstorage:barrel", x = 1, y = 0, z = 0, tags = {} },
+                { name = "computercraft:turtle_advanced", x = 1, y = 0, z = 1, tags = {} },
+                { name = "minecraft:gold_ore", x = 1, y = -3, z = 1, tags = { "forge:ores" } },
+            }
+        end
+    end,
+}
+
+local baseScannerObj = GeoScanner.new(baseScannerPeripheral, "back")
+local baseComp = nil
+local turtleMiner4 = nil
+
+-- Linked mock Ender Modems: when Turtle transmits on channel 4821, Base Computer receives it and transmits back!
+local openChannels = {}
+local baseModem = {
+    isWireless = function() return true end,
+    open = function(ch) openChannels[ch] = true end,
+    isOpen = function(ch) return openChannels[ch] == true end,
+    transmit = function(ch, replyCh, payload)
+        if turtleMiner4 and ch == GeoScanner.MODEM_CHANNEL then
+            turtleMiner4:handleModemMessage(payload)
+        end
+    end,
+}
+local turtleModem = {
+    isWireless = function() return true end,
+    open = function(ch) openChannels[ch] = true end,
+    isOpen = function(ch) return openChannels[ch] == true end,
+    transmit = function(ch, replyCh, payload)
+        if baseComp and ch == GeoScanner.MODEM_CHANNEL then
+            baseComp:handleModemMessage(payload)
+        end
+    end,
+}
+
+baseComp = baseComputerMod.new({
+    scanner = baseScannerObj,
+    modem = baseModem,
+})
+
+-- Set up Turtle inventory: Slot 1 has an Energy Cube (`mekanism:ultimate_energy_cube`), which MUST stay in the turtle for fuel!
+local barrelStoredItems = {}
+local turtle4Inv = {
+    [1] = { name = "mekanism:ultimate_energy_cube", count = 1, energy = 5000, tags = {} },
+}
+local t4Slot = 1
+local t4WarpCalls = 0
+local t4Fuel = 1000
+
+local t4Automata = {
+    savePoint = function(name)
+        savedWarpPoints[name] = true
+        return true
+    end,
+    points = function() return { "home" } end,
+    estimateWarpCost = function() return 10 end,
+    getWarpCooldown = function() return 0 end,
+    warpToPoint = function(name)
+        if name == "home" and t4Fuel >= 10 then
+            t4Fuel = t4Fuel - 10
+            t4WarpCalls = t4WarpCalls + 1
+            return true
+        end
+        return nil, "Not enough fuel"
+    end,
+    chargeTurtle = function()
+        local item = turtle4Inv[t4Slot]
+        if item and item.name:find("energy_cube", 1, true) then
+            t4Fuel = t4Fuel + 500
+            return true, 500
+        end
+        return nil, "Not an energy item"
+    end,
+}
+
+turtleMiner4 = turtleMinerMod.new({
+    automata = t4Automata,
+    modem = turtleModem,
+})
+_G.gps = nil
+turtleMiner4.pos = { x = 0, y = 0, z = 0, dir = 0 }
+turtleMiner4:sethome("n") -- Turtle at Home (0,0,0) facing North (0)
+
+_G.turtle = {
+    getFuelLevel = function() return t4Fuel end,
+    getSelectedSlot = function() return t4Slot end,
+    select = function(s) t4Slot = s; return true end,
+    getItemCount = function(s) return turtle4Inv[s] and turtle4Inv[s].count or 0 end,
+    getItemDetail = function(s) return turtle4Inv[s] end,
+    forward = function() t4Fuel = t4Fuel - 1; return true end,
+    up = function() t4Fuel = t4Fuel - 1; return true end,
+    down = function() t4Fuel = t4Fuel - 1; return true end,
+    turnLeft = function() return true end,
+    turnRight = function() return true end,
+    detect = function() return false end,
+    detectUp = function() return false end,
+    detectDown = function() return false end,
+    inspect = function()
+        -- When Turtle is at Home (0,0,0) and facing North (dir = 0), the Sophisticated Storage Barrel is directly in front!
+        if turtleMiner4:isAtHome() and turtleMiner4.pos.dir == 0 then
+            return true, { name = "sophisticatedstorage:barrel" }
+        end
+        -- When facing West (dir = 3) at Home, the Base Advanced Computer is to its left
+        if turtleMiner4:isAtHome() and turtleMiner4.pos.dir == 3 then
+            return true, { name = "computercraft:computer_advanced" }
+        end
+        return false, "No block"
+    end,
+    inspectUp = function() return false, "No block" end,
+    inspectDown = function() return false, "No block" end,
+    dig = function()
+        -- Simulate mining diamond ore + picking up cobbled deepslate
+        turtle4Inv[2] = { name = "minecraft:diamond", count = 2, tags = { ["forge:gems"] = true } }
+        turtle4Inv[3] = { name = "minecraft:cobbled_deepslate", count = 4, tags = {} }
+        return true
+    end,
+    digUp = function() return true end,
+    digDown = function()
+        -- Simulate mining iron ore
+        turtle4Inv[4] = { name = "minecraft:raw_iron", count = 3, tags = { ["forge:raw_materials"] = true } }
+        return true
+    end,
+    placeDown = function() return false end,
+    placeUp = function() return false end,
+    place = function() return false end,
+    drop = function()
+        -- Only allow dropping into the Sophisticated Storage Barrel at Home facing North (0)!
+        assertTrue(turtleMiner4:isAtHome(), "turtle only drops items when back at Home")
+        assertEq(turtleMiner4.pos.dir, 0, "turtle faces the Sophisticated Storage Barrel when unloading")
+        local item = turtle4Inv[t4Slot]
+        if item then
+            table.insert(barrelStoredItems, { name = item.name, count = item.count })
+            turtle4Inv[t4Slot] = nil
+            return true
+        end
+        return false
+    end,
+}
+
+-- Start the Turtle
+turtleMiner4:start()
+
+-- Step 1: Turtle has empty oreQueue -> requests ore locations from Base Computer over Ender Modem!
+-- Base Computer scans, calibrates Turtle offset (1, 0, 1), marks Base blocks as forbidden, and sends 2 ores:
+--   Ore 1: Iron Ore at (0, -2, 0)
+--   Ore 2: Diamond Ore at (1, -2, 0)
+-- Turtle mines Ore 1 (Iron Ore at (0, -2, 0)), leaving 1 ore in queue!
+local s1 = turtleMiner4:stepWorker()
+assertEq(s1, "mined", "Step 1: Turtle received ore locations from Base Computer and mined first ore")
+assertEq(baseComp.turtleOffset.x, 1, "Base Computer auto-calibrated Turtle Home offset X = 1")
+assertEq(baseComp.turtleOffset.y, 0, "Base Computer auto-calibrated Turtle Home offset Y = 0")
+assertEq(baseComp.turtleOffset.z, 1, "Base Computer auto-calibrated Turtle Home offset Z = 1")
+assertTrue(turtleMiner4:isBlocked(-1, 0, 0), "Base Advanced Computer at (-1,0,0) is marked forbidden in blockedCoords")
+assertTrue(turtleMiner4:isBlocked(-1, 0, -1), "Base Geo Scanner at (-1,0,-1) is marked forbidden in blockedCoords")
+assertTrue(turtleMiner4:isBlocked(0, 0, -1), "Sophisticated Storage Barrel at (0,0,-1) is marked forbidden in blockedCoords")
+assertEq(#turtleMiner4.oreQueue, 1, "1 ore location remaining in Turtle's queue")
+
+-- Step 2: Turtle mines the last passed ore (Diamond Ore at (1, -2, 0)).
+-- Because no ores are left in the passed list (#oreQueue == 0), the Turtle immediately:
+--   1) Teleports back to Home via End Automata (`warpToPoint("home")`) and aligns with Home (dir = 0)
+--   2) Unloads EVERYTHING in its inventory (raw_iron, diamond, cobbled_deepslate) into the Sophisticated Storage Barrel
+--   3) Keeps the Energy Cube (`mekanism:ultimate_energy_cube`) in slot 1 for fuel!
+local s2 = turtleMiner4:stepWorker()
+assertEq(s2, "mined", "Step 2: Turtle mined final passed ore, teleported Home, and unloaded to Barrel")
+assertEq(t4WarpCalls, 1, "Turtle teleported back to Home using End Automata when no ores were left")
+assertTrue(turtleMiner4:isAtHome(), "Turtle is back at Home (0,0,0)")
+assertEq(turtleMiner4.pos.dir, 0, "Turtle is aligned with Home facing North (0)")
+assertTrue(turtle4Inv[1] ~= nil and turtle4Inv[1].name == "mekanism:ultimate_energy_cube", "Energy Cube stayed in Turtle's inventory for fuel")
+assertEq(turtle4Inv[2], nil, "Diamonds were placed into the Sophisticated Storage Barrel")
+assertEq(turtle4Inv[3], nil, "Leftover cobbled_deepslate was placed into the Sophisticated Storage Barrel")
+assertEq(turtle4Inv[4], nil, "Raw iron was placed into the Sophisticated Storage Barrel")
+assertEq(#barrelStoredItems, 3, "All 3 non-Energy-Cube inventory slots were deposited into the Sophisticated Storage Barrel")
+
+-- Step 3: The cycle repeats! Next worker step automatically requests the next batch of ores from the Base Computer!
+local s3 = turtleMiner4:stepWorker()
+assertEq(s3, "mined", "Step 3: Cycle repeated automatically — requested new scan from Base Computer, mined gold ore, teleported Home, and unloaded to Barrel")
+assertEq(baseScanCycle, 2, "Base Computer performed second Geo Scanner scan for the new cycle")
+assertEq(t4WarpCalls, 2, "Turtle teleported Home again at the end of the second cycle")
+assertTrue(turtle4Inv[1] ~= nil and turtle4Inv[1].name == "mekanism:ultimate_energy_cube", "Energy Cube still kept in Turtle's inventory")
+
 print(("ALL %d ASSERTIONS PASSED!"):format(passed))

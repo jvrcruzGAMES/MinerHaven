@@ -26,6 +26,127 @@ GeoScanner.AUTOMATA_TYPES = {
     "weak_automata",
 }
 
+--- Wireless / Ender Modem channel and protocol for Base Computer <-> Turtle communication.
+GeoScanner.MODEM_CHANNEL = 4821
+GeoScanner.PROTOCOL = "minerhaven"
+
+--- Forbidden blocks that the turtle must NEVER break (base blocks, teleport pads, bedrock).
+GeoScanner.BASE_PROTECTED_BLOCKS = {
+    ["allthemodium:teleport_pad"] = true,
+    ["minecraft:bedrock"] = true,
+    -- CC: Tweaked base computers, turtles, modems, peripherals
+    ["computercraft:computer_normal"] = true,
+    ["computercraft:computer_advanced"] = true,
+    ["computercraft:computer_command"] = true,
+    ["computercraft:turtle_normal"] = true,
+    ["computercraft:turtle_advanced"] = true,
+    ["computercraft:wireless_modem_normal"] = true,
+    ["computercraft:wireless_modem_advanced"] = true,
+    ["computercraft:wired_modem"] = true,
+    ["computercraft:wired_modem_full"] = true,
+    ["computercraft:cable"] = true,
+    ["computercraft:monitor_normal"] = true,
+    ["computercraft:monitor_advanced"] = true,
+    ["computercraft:disk_drive"] = true,
+    ["computercraft:printer"] = true,
+    ["computercraft:speaker"] = true,
+    ["computercraft:redstone_relay"] = true,
+    -- Advanced Peripherals base blocks
+    ["advancedperipherals:geo_scanner"] = true,
+    ["advancedperipherals:environment_detector"] = true,
+    ["advancedperipherals:player_detector"] = true,
+    ["advancedperipherals:energy_detector"] = true,
+    ["advancedperipherals:block_reader"] = true,
+    ["advancedperipherals:nbt_storage"] = true,
+    ["advancedperipherals:inventory_manager"] = true,
+    ["advancedperipherals:redstone_integrator"] = true,
+    ["advancedperipherals:chat_box"] = true,
+    ["advancedperipherals:peripheral_casing"] = true,
+    -- Sophisticated Storage barrels & chests at the base
+    ["sophisticatedstorage:barrel"] = true,
+    ["sophisticatedstorage:copper_barrel"] = true,
+    ["sophisticatedstorage:iron_barrel"] = true,
+    ["sophisticatedstorage:gold_barrel"] = true,
+    ["sophisticatedstorage:diamond_barrel"] = true,
+    ["sophisticatedstorage:netherite_barrel"] = true,
+    ["sophisticatedstorage:limited_barrel_1"] = true,
+    ["sophisticatedstorage:limited_barrel_2"] = true,
+    ["sophisticatedstorage:limited_barrel_3"] = true,
+    ["sophisticatedstorage:limited_barrel_4"] = true,
+    ["sophisticatedstorage:chest"] = true,
+    ["sophisticatedstorage:copper_chest"] = true,
+    ["sophisticatedstorage:iron_chest"] = true,
+    ["sophisticatedstorage:gold_chest"] = true,
+    ["sophisticatedstorage:diamond_chest"] = true,
+    ["sophisticatedstorage:netherite_chest"] = true,
+    ["sophisticatedstorage:controller"] = true,
+    -- Vanilla & Mekanism base storage/energy blocks
+    ["minecraft:barrel"] = true,
+    ["minecraft:chest"] = true,
+    ["minecraft:trapped_chest"] = true,
+    ["minecraft:ender_chest"] = true,
+    ["mekanism:basic_energy_cube"] = true,
+    ["mekanism:advanced_energy_cube"] = true,
+    ["mekanism:elite_energy_cube"] = true,
+    ["mekanism:ultimate_energy_cube"] = true,
+    ["mekanism:creative_energy_cube"] = true,
+}
+
+--- Check whether a block registry name is a forbidden/protected base block.
+-- @tparam string name Block registry ID
+-- @treturn boolean
+function GeoScanner.isProtectedBlockName(name)
+    if type(name) ~= "string" then
+        return false
+    end
+    local lower = name:lower()
+    if GeoScanner.BASE_PROTECTED_BLOCKS[lower] then
+        return true
+    end
+    if lower:match("^computercraft:")
+        or lower:match("^advancedperipherals:")
+        or lower:match("^sophisticatedstorage:")
+        or lower:find("teleport_pad", 1, true)
+        or lower:find("energy_cube", 1, true)
+        or lower:find("wireless_modem", 1, true)
+        or lower:find("wired_modem", 1, true)
+        or lower:find("geo_scanner", 1, true)
+    then
+        return true
+    end
+    return false
+end
+
+--- Check whether a block registry name is a Sophisticated Storage barrel or base storage container.
+-- @tparam string name Block registry ID
+-- @treturn boolean
+function GeoScanner.isStorageBarrelName(name)
+    if type(name) ~= "string" then
+        return false
+    end
+    local lower = name:lower()
+    if lower:match("^sophisticatedstorage:")
+        or lower:find("barrel", 1, true)
+        or lower:find("chest", 1, true)
+    then
+        return true
+    end
+    return false
+end
+
+--- Check whether a block registry name is a CC: Tweaked Turtle block.
+-- @tparam string name Block registry ID
+-- @treturn boolean
+function GeoScanner.isTurtleBlockName(name)
+    if type(name) ~= "string" then
+        return false
+    end
+    local lower = name:lower()
+    return lower == "computercraft:turtle_normal"
+        or lower == "computercraft:turtle_advanced"
+        or lower:match("^computercraft:turtle") ~= nil
+end
+
 --- Default patterns that identify a block as an ore when tags are missing or alongside tags.
 GeoScanner.DEFAULT_ORE_PATTERNS = {
     "_ore$",
@@ -546,6 +667,113 @@ function GeoScanner.findAutomata(sideOrName)
     end
 
     return nil, "No End Automata found"
+end
+
+--- Check if a peripheral table is a CC: Tweaked Modem peripheral.
+-- @tparam table p Peripheral table
+-- @treturn boolean
+function GeoScanner.isModemPeripheral(p)
+    if type(p) ~= "table" then
+        return false
+    end
+    return type(p.open) == "function" and type(p.transmit) == "function"
+end
+
+--- Find and open a connected Wireless / Ender Modem peripheral on `GeoScanner.MODEM_CHANNEL`.
+-- @tparam[opt] string sideOrName Specific side or network name
+-- @treturn table|nil, string|nil Modem peripheral table and its side/name (or `nil, err`)
+function GeoScanner.findModem(sideOrName)
+    if not peripheral then
+        return nil, "CC: Tweaked peripheral API is not available"
+    end
+
+    local function prepareModem(p, name)
+        if type(p.isOpen) == "function" then
+            local ok, opened = pcall(p.isOpen, GeoScanner.MODEM_CHANNEL)
+            if not (ok and opened) then
+                pcall(p.open, GeoScanner.MODEM_CHANNEL)
+            end
+        else
+            pcall(p.open, GeoScanner.MODEM_CHANNEL)
+        end
+        return p, name
+    end
+
+    if type(sideOrName) == "string" and sideOrName ~= "" then
+        if peripheral.isPresent and peripheral.isPresent(sideOrName) then
+            local p = peripheral.wrap and peripheral.wrap(sideOrName)
+            if GeoScanner.isModemPeripheral(p) then
+                return prepareModem(p, sideOrName)
+            end
+        end
+        return nil, ("No Modem found on '%s'"):format(sideOrName)
+    end
+
+    if type(peripheral.getNames) == "function" and type(peripheral.wrap) == "function" then
+        local fallbackModem, fallbackName = nil, nil
+        for _, name in ipairs(peripheral.getNames()) do
+            local p = peripheral.wrap(name)
+            if GeoScanner.isModemPeripheral(p) then
+                local isWireless = (type(p.isWireless) == "function") and p.isWireless() or false
+                if isWireless then
+                    return prepareModem(p, name)
+                elseif not fallbackModem then
+                    fallbackModem, fallbackName = p, name
+                end
+            end
+        end
+        if fallbackModem then
+            return prepareModem(fallbackModem, fallbackName)
+        end
+    end
+
+    if type(peripheral.find) == "function" then
+        local p = peripheral.find("modem")
+        if GeoScanner.isModemPeripheral(p) then
+            local foundName = "modem"
+            if peripheral.getName then
+                local ok, n = pcall(peripheral.getName, p)
+                if ok and n then
+                    foundName = n
+                end
+            end
+            return prepareModem(p, foundName)
+        end
+    end
+
+    return nil, "No Ender/Wireless Modem found"
+end
+
+--- Transmit a MinerHaven protocol table over a Modem peripheral on `GeoScanner.MODEM_CHANNEL`.
+-- @tparam table modem Wrapped modem peripheral
+-- @tparam table payload Table message to transmit
+-- @treturn boolean
+function GeoScanner.transmitMessage(modem, payload)
+    if not GeoScanner.isModemPeripheral(modem) or type(payload) ~= "table" then
+        return false
+    end
+    payload.protocol = GeoScanner.PROTOCOL
+    if type(modem.isOpen) == "function" then
+        local ok, opened = pcall(modem.isOpen, GeoScanner.MODEM_CHANNEL)
+        if not (ok and opened) then
+            pcall(modem.open, GeoScanner.MODEM_CHANNEL)
+        end
+    else
+        pcall(modem.open, GeoScanner.MODEM_CHANNEL)
+    end
+    local ok = pcall(modem.transmit, GeoScanner.MODEM_CHANNEL, GeoScanner.MODEM_CHANNEL, payload)
+    return ok
+end
+
+--- Parse a `modem_message` or `rednet_message` event into a MinerHaven message table if valid.
+-- @treturn table|nil
+function GeoScanner.parseModemEvent(ev, p1, p2, p3, p4)
+    if ev == "modem_message" and p2 == GeoScanner.MODEM_CHANNEL and type(p4) == "table" and p4.protocol == GeoScanner.PROTOCOL then
+        return p4
+    elseif ev == "rednet_message" and type(p2) == "table" and p2.protocol == GeoScanner.PROTOCOL then
+        return p2
+    end
+    return nil
 end
 
 --- Get the FE/fuel cost for scanning at the given radius.

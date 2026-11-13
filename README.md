@@ -16,47 +16,47 @@ wget run https://raw.githubusercontent.com/jvrcruzGAMES/MinerHaven/main/install.
 
 ### Installer Prompts & Flags
 
-When you run `install.lua`, it asks whether the installation is for a **Turtle** (auto-detecting if the `turtle` API is present):
+When you run `install.lua`, it asks **which computer this installation is for** (`b = Base Computer`, `t = Turtle`):
 
-1. **Standard Computer / Pocket Computer Install**:
-   - Installs `/lib/geoscanner.lua` and `/minerhaven.lua`, and registers the `minerhaven` and `mh` aliases.
-2. **Turtle Install** (`y` at prompt, or `--turtle` flag):
+1. **Base Computer Install** (`b` at prompt, or `--base` flag):
+   - Installs `/lib/geoscanner.lua`, `/minerhaven.lua`, and the Base Computer Controller `/base_computer.lua` (`base` alias).
+   - Configures `/startup/99_minerhaven.lua` so the **Base Computer Controller (`base_computer.lua`) loads automatically on startup**, scanning with the attached Geo Scanner and passing ore locations to the Turtle over the Ender Modem.
+2. **Turtle Install** (`t` at prompt, or `--turtle` flag):
    - Installs `/lib/geoscanner.lua`, `/minerhaven.lua`, and the Turtle Auto-Miner `/turtle_miner.lua` (`miner` alias).
-   - **Prompts to set the Turtle's current location as its Home** and saves it to `/home.cfg` (along with `/turtle_pos.cfg`).
+   - **Prompts to set the Turtle's current location as its Home** (default facing **North**, reprogrammable via `n/e/s/w`), saves `/home.cfg`, and registers the `"home"` warp point on the attached **End Automata** (`savePoint("home")`).
    - Configures `/startup/99_minerhaven.lua` so the **Turtle Auto-Miner (`turtle_miner.lua`) loads automatically on startup**.
 
 #### CLI Flags for `install.lua`
-- `--turtle` / `--no-turtle`: Skip the prompt and force Turtle or non-Turtle installation.
-- `--set-home` / `--facing <n|e|s|w>`: Automatically set the turtle's current location as Home without prompting.
+- `--base`: Skip the prompt and install for the **Base Advanced Computer**.
+- `--turtle`: Skip the prompt and install for the **Turtle**.
+- `--set-home` / `--facing <n|e|s|w>`: Automatically set the turtle's current location and facing as Home without prompting.
 - `--lib-only`: Install only `/lib/geoscanner.lua` for use in your own scripts.
-- `--startup`: Auto-start the `minerhaven` radar UI on boot (for non-turtle computers).
 - `--dir <path>`: Install files into a custom directory.
 
 ---
 
-## Turtle Auto-Miner (`turtle_miner.lua` / `miner`) — End Automata Edition
+## 2-Computer Strategy (`base_computer.lua` + `turtle_miner.lua`)
 
-When installed for a Turtle, **MinerHaven End Automata Auto-Miner** loads automatically on startup and stays running on the turtle screen. It is designed for an [Advanced Peripherals End Automata](https://docs.advanced-peripherals.de/0.7/turtles/metaphysics/end_automata/) + [Geo Scanner](https://docs.advanced-peripherals.de/0.7/peripherals/geo_scanner/) turtle.
+### Base Setup
+1. **Base Advanced Computer** (placed to the side of the Turtle) with an **Ender Modem** and the **Geo Scanner** attached.
+2. **End Automata Turtle** (default facing **North** toward the barrel, reprogrammable) with an **Ender Modem** and an **End Automata Core** (plus an **Energy Cube** in its inventory for fuel).
+3. **Sophisticated Storage Barrel** placed adjacent to the Turtle at the base.
 
-### How It Works
-- **`start` instruction**:
-  1. **Chunk Ore Mining**: Uses `chunkAnalyze()` and `scan(8)` to systematically mine **all ores in the turtle's current chunk** (`#forge:ores`, `#c:ores`, `#minecraft:*_ores`), descending through the chunk column as each vertical slice is cleared until `0` ores remain in the chunk.
-  2. **End Automata Digging & Movement**:
-     - Breaks blocks using `automata.digBlock()` (holding a pickaxe in the turtle's inventory) or a side-equipped pickaxe.
-     - **Down-first movement priority**: Prefers moving **down (`-Y`)** first before moving horizontally in the direction of the ore.
-     - **Places Waste Blocks in Path**: Places non-ore waste blocks (`cobblestone`, `dirt`, `cobbled_deepslate`, `stone`, etc.) behind/around itself in its path (`placeUp`, `placeDown`, `place`) instead of dropping them on the ground.
-     - **Obstacle breaking & Teleport Pad protection**: Breaks obstructing blocks along its path **except `allthemodium:teleport_pad`**. If an `allthemodium:teleport_pad` is detected, the turtle leaves it untouched and automatically pathfinds an alternative route around it.
-  3. **Energy Charging (`chargeTurtle`)**:
-     - Automatically charges the turtle from FE/RF energy items in its inventory (such as an Energy Tablet, Flux Capacitor, or Battery) via `automata.chargeTurtle()`, falling back to `turtle.refuel()` if standard burnable fuel is present.
-  4. **Teleport to Home + Dig-to-Home Fallback**:
-     - When its 16-slot inventory is full (or when the chunk is finished), the turtle **teleports back to Home** via `automata.warpToPoint("home")` and **aligns its facing direction with Home**.
-     - **Dig-to-Home Fallback**: If the End Automata breaks or if the warp fuel cost (`estimateWarpCost("home")`) exceeds the turtle's available fuel, it automatically falls back to the 3D dig-to-home pathfinding system and aligns with Home upon arrival.
-  5. **Waits at Home** until its inventory has **no more ores** (e.g., unloaded by a player or hopper), then automatically resumes mining the chunk!
-- **`stop` instruction**:
-  - Immediately stops mining, **teleports (or digs) back to its Home** (even if its inventory is not full), aligns with Home, and transitions to **`IDLE (Stopped)`**.
-  - **Does not exit or terminate**—the program stays alive and idle at Home until you give the `start` instruction again.
-- **`sethome` instruction**:
-  - Sets the turtle's Home to the **current block it is in**, saves it to `/home.cfg`, and registers the `"home"` warp point on the End Automata via `automata.savePoint("home")`.
+### How the Cycle Works
+1. **Base Computer Scans & Passes Ore Locations**:
+   - The Base Computer (`base_computer.lua`) scans with the **Geo Scanner**, automatically calibrates the Turtle's Home offset relative to the scanner, and sends the list of **Ore locations** (plus all forbidden **Base block coordinates**) to the Turtle over the **Ender Modem**.
+2. **Turtle Mines Passed Ore Locations**:
+   - The Turtle (`turtle_miner.lua`) goes and mines the passed ore locations:
+     - **Down-first movement priority**: Moves **down (`-Y`)** first before moving horizontally (`X/Z`).
+     - **Places Waste Blocks in Path**: Places non-ore waste blocks (`cobblestone`, `dirt`, `cobbled_deepslate`, `stone`, etc.) in its path instead of dropping them.
+     - **Forbidden Base Blocks & Teleport Pad Protection**: Never breaks any Base blocks (`computercraft:*`, `advancedperipherals:*`, `sophisticatedstorage:*`, `mekanism:*_energy_cube`, `minecraft:barrel`, `minecraft:chest`), `allthemodium:teleport_pad`, or `minecraft:bedrock`, pathfinding around them if encountered.
+     - **Energy Cube Charging**: Charges the turtle from the Energy Cube in its inventory via `automata.chargeTurtle()`.
+3. **Teleport Back to Base**:
+   - When the Turtle's 16-slot inventory is **full**, or when **no ores are left** in the passed list, the Turtle **teleports back to Home** via `automata.warpToPoint("home")` and aligns with Home (only digging its way back if there is not enough fuel to teleport).
+4. **Unload into Sophisticated Storage Barrel**:
+   - Back at the base, the Turtle places **everything** in its inventory into the **Sophisticated Storage Barrel** (`sophisticatedstorage:*barrel*`) to its side/front, **with the exception of any Energy Cube** in its inventory (which stays for fuel).
+5. **Repeat**:
+   - The Turtle requests the next scan from the Base Computer and the cycle repeats automatically!
 
 ### Controlling the Turtle Auto-Miner
 While the program is running on the Turtle screen, type a command and press **Enter** (or click the on-screen buttons on an Advanced Turtle):
