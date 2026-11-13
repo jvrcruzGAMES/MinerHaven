@@ -29,8 +29,7 @@ MinerHaven/
 │       └── device/main.lua      # libdevice: Worker pairing handshake & device identity
 └── lib/                         # Shared Core Libraries
     ├── crypto/main.lua          # libcrypto: SHA-256, HMAC-SHA256, CTR cipher, HKDF
-    ├── workernet/main.lua       # libworkernet: Encrypted transport, HMAC signatures, replay defense
-    └── geoscanner.lua           # Geo Scanner utilities & tag normalization
+    └── workernet/main.lua       # libworkernet: Encrypted transport, HMAC signatures, replay defense
 ```
 
 ---

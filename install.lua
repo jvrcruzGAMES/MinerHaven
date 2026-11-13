@@ -193,7 +193,6 @@ local isController = (installRole == "controller")
 local files = {
     { remote = "lib/crypto/main.lua", dest = joinPath(targetDir, "lib/crypto/main.lua") },
     { remote = "lib/workernet/main.lua", dest = joinPath(targetDir, "lib/workernet/main.lua") },
-    { remote = "lib/geoscanner.lua", dest = joinPath(targetDir, "lib/geoscanner.lua") },
     { remote = "startup.lua", dest = joinPath(targetDir, "startup.lua") },
 }
 

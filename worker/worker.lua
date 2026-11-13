@@ -12,7 +12,6 @@ local function loadFile(path)
     error("Could not load file: " .. path)
 end
 
-local GeoScanner = loadFile("lib/geoscanner.lua")
 local Workernet = loadFile("lib/workernet/main.lua")
 local Device = loadFile("worker/lib/device/main.lua")
 
@@ -22,6 +21,20 @@ Worker.__index = Worker
 local HOME_FILE = "worker/home.cfg"
 local POS_FILE = "worker/pos.cfg"
 local HOME_WARP_NAME = "home"
+
+local AUTOMATA_TYPES = {
+    "endAutomata",
+    "end_automata",
+    "overpoweredEndAutomata",
+    "overpowered_end_automata",
+    "weakAutomata",
+    "weak_automata",
+}
+
+local PROTECTED_BLOCKS = {
+    ["allthemodium:teleport_pad"] = true,
+    ["minecraft:bedrock"] = true,
+}
 
 local DIR_NAMES = { [0] = "N", [1] = "E", [2] = "S", [3] = "W" }
 local DIR_VECTORS = {
@@ -161,7 +174,7 @@ end
 
 function Worker:findAutomata()
     if not peripheral then return nil end
-    for _, t in ipairs(GeoScanner.AUTOMATA_TYPES) do
+    for _, t in ipairs(AUTOMATA_TYPES) do
         local p = peripheral.find(t)
         if p then
             for _, side in ipairs(peripheral.getNames()) do
@@ -249,7 +262,24 @@ end
 function Worker:isEnergyItem(detail)
     if type(detail) ~= "table" or type(detail.name) ~= "string" then return false end
     local name = detail.name:lower()
-    return self.energyItems[name] or GeoScanner.isEnergyItemName(name)
+    if self.energyItems[name] then return true end
+    if name:find("_ore", 1, true) then return false end
+    return name:find("energy", 1, true)
+        or name:find("battery", 1, true)
+        or name:find("capacitor", 1, true)
+        or name:find("flux_", 1, true)
+        or name:find("_cell", 1, true)
+        or name:find("energy_tablet", 1, true)
+        or name:find("energy_cube", 1, true)
+        or name:find("power_cell", 1, true)
+end
+
+function Worker.isStorageBarrel(name)
+    if type(name) ~= "string" then return false end
+    local lower = name:lower()
+    return lower:match("^sophisticatedstorage:")
+        or lower:find("barrel", 1, true)
+        or lower:find("chest", 1, true)
 end
 
 function Worker:shouldKeepInInventory(detail)
@@ -270,15 +300,15 @@ function Worker:unloadToBarrel()
     -- Locate barrel
     local dropFn = nil
     local hasF, fData = turtle.inspect()
-    if hasF and GeoScanner.isStorageBarrelName(fData.name) then
+    if hasF and Worker.isStorageBarrel(fData.name) then
         dropFn = turtle.drop
     else
         local hasU, uData = turtle.inspectUp()
-        if hasU and GeoScanner.isStorageBarrelName(uData.name) then
+        if hasU and Worker.isStorageBarrel(uData.name) then
             dropFn = turtle.dropUp
         else
             local hasD, dData = turtle.inspectDown()
-            if hasD and GeoScanner.isStorageBarrelName(dData.name) then
+            if hasD and Worker.isStorageBarrel(dData.name) then
                 dropFn = turtle.dropDown
             else
                 -- Try sides
@@ -286,7 +316,7 @@ function Worker:unloadToBarrel()
                 for _, d in ipairs({ (baseDir + 1) % 4, (baseDir + 3) % 4, (baseDir + 2) % 4 }) do
                     self:turnTo(d)
                     local okB, bData = turtle.inspect()
-                    if okB and GeoScanner.isStorageBarrelName(bData.name) then
+                    if okB and Worker.isStorageBarrel(bData.name) then
                         dropFn = turtle.drop
                         break
                     end
@@ -349,14 +379,56 @@ function Worker:isBlocked(x, y, z)
 end
 
 function Worker:isProtectedBlock(name)
-    return GeoScanner.isProtectedBlockName(name)
+    if type(name) ~= "string" then return false end
+    local lower = name:lower()
+    if PROTECTED_BLOCKS[lower] then return true end
+    return lower:match("^computercraft:")
+        or lower:match("^advancedperipherals:")
+        or lower:match("^sophisticatedstorage:")
+        or lower:match("^fluxnetworks:")
+        or lower:find("teleport_pad", 1, true)
+        or lower:find("energy_cube", 1, true)
+        or lower:find("wireless_modem", 1, true)
+        or lower:find("wired_modem", 1, true)
+        or lower:find("geo_scanner", 1, true)
+end
+
+function Worker:isWasteName(name)
+    if type(name) ~= "string" then return false end
+    local lower = name:lower()
+    if self:isEnergyItem({ name = lower }) then return false end
+    local short = lower:match("^[^:]+:(.+)$") or lower
+    if short:find("_ore", 1, true) or short:find("raw_", 1, true) or short == "redstone" or short == "gilded_blackstone" then
+        return false
+    end
+    return short == "dirt"
+        or short == "cobblestone"
+        or short == "stone"
+        or short == "deepslate"
+        or short == "cobbled_deepslate"
+        or short == "gravel"
+        or short == "sand"
+        or short == "sandstone"
+        or short == "tuff"
+        or short == "andesite"
+        or short == "diorite"
+        or short == "granite"
+        or short == "netherrack"
+        or short == "basalt"
+        or short == "blackstone"
+        or short == "end_stone"
+        or short:match("_dirt$")
+        or short:match("_cobblestone$")
+        or short:match("^cobbled_")
+        or short:match("_grass$")
+        or short:match("_stone$")
 end
 
 function Worker:selectWasteBlock()
     if not turtle or not turtle.getItemDetail then return false end
     for slot = 1, 16 do
         local detail = turtle.getItemDetail(slot)
-        if detail and detail.name and GeoScanner.isWasteName(detail.name) and not self:isCoalItem(detail) then
+        if detail and detail.name and self:isWasteName(detail.name) and not self:isCoalItem(detail) then
             turtle.select(slot)
             return true
         end

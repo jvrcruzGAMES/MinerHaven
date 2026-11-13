@@ -44,7 +44,17 @@ end
 
 setupPackagePath()
 
-local GeoScanner = require("geoscanner")
+local function loadOres()
+    local ok, res = pcall(dofile, "controller/lib/ores/main.lua")
+    if ok then return res end
+    local ok2, res2 = pcall(dofile, "/controller/lib/ores/main.lua")
+    if ok2 then return res2 end
+    local ok3, res3 = pcall(require, "geoscanner")
+    if ok3 then return res3 end
+    error("Could not load ores library")
+end
+
+local GeoScanner = loadOres()
 
 local HOME_FILE = "/home.cfg"
 local POS_FILE = "/turtle_pos.cfg"

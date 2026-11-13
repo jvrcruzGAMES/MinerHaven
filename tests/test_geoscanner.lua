@@ -1,7 +1,8 @@
--- Automated test suite for MinerHaven (lib/geoscanner.lua, minerhaven.lua, turtle_miner.lua, install.lua)
+-- Automated test suite for MinerHaven (controller/lib/ores/main.lua, controller, worker, install.lua)
 package.path = "./?.lua;./lib/?.lua;" .. package.path
 
-local GeoScanner = require("geoscanner")
+local GeoScanner = dofile("controller/lib/ores/main.lua")
+package.preload["geoscanner"] = function() return GeoScanner end
 
 local passed = 0
 local function assertEq(actual, expected, msg)
@@ -232,7 +233,7 @@ end
 
 local installChunk = assert(loadfile("./install.lua"))
 installChunk()
-assertTrue(writtenFiles["/lib/geoscanner.lua"] ~= nil, "installer wrote /lib/geoscanner.lua")
+assertTrue(writtenFiles["/lib/geoscanner.lua"] == nil, "installer does not write removed /lib/geoscanner.lua")
 assertTrue(writtenFiles["/lib/crypto/main.lua"] ~= nil, "installer wrote /lib/crypto/main.lua")
 assertTrue(writtenFiles["/lib/workernet/main.lua"] ~= nil, "installer wrote /lib/workernet/main.lua")
 assertTrue(writtenFiles["/controller/main.lua"] ~= nil, "installer wrote /controller/main.lua for controller install")
