@@ -4,7 +4,16 @@
 local Dashboard = {}
 Dashboard.__index = Dashboard
 
-local PairingHandler = dofile("controller/pairing.lua")
+local function loadFile(path)
+    local clean = path:gsub("^/+", "")
+    local ok, res = pcall(dofile, clean)
+    if ok then return res end
+    local ok2, res2 = pcall(dofile, "/" .. clean)
+    if ok2 then return res2 end
+    error("Could not load file: " .. path)
+end
+
+local PairingHandler = loadFile("controller/pairing.lua")
 
 function Dashboard.new(controller)
     local self = setmetatable({}, Dashboard)

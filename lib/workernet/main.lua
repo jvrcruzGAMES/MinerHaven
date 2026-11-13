@@ -1,7 +1,16 @@
 --- libworkernet - Secure Transport Protocol for MinerHaven
 -- Handles packet framing, encryption, HMAC signatures, sequence numbers, and replay protection.
 
-local Crypto = dofile("lib/crypto/main.lua")
+local function loadFile(path)
+    local clean = path:gsub("^/+", "")
+    local ok, res = pcall(dofile, clean)
+    if ok then return res end
+    local ok2, res2 = pcall(dofile, "/" .. clean)
+    if ok2 then return res2 end
+    error("Could not load file: " .. path)
+end
+
+local Crypto = loadFile("lib/crypto/main.lua")
 
 local Workernet = {}
 Workernet.DEFAULT_CHANNEL = 4821

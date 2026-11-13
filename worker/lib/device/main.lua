@@ -1,8 +1,17 @@
 --- libdevice - Worker-Side Pairing & Device Management
 -- Generates 6-digit pairing code, advertises pairing state, completes cryptographic handshake.
 
-local Crypto = dofile("lib/crypto/main.lua")
-local Workernet = dofile("lib/workernet/main.lua")
+local function loadFile(path)
+    local clean = path:gsub("^/+", "")
+    local ok, res = pcall(dofile, clean)
+    if ok then return res end
+    local ok2, res2 = pcall(dofile, "/" .. clean)
+    if ok2 then return res2 end
+    error("Could not load file: " .. path)
+end
+
+local Crypto = loadFile("lib/crypto/main.lua")
+local Workernet = loadFile("lib/workernet/main.lua")
 
 local Device = {}
 Device.CONFIG_FILE = "worker/pairing.cfg"

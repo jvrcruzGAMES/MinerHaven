@@ -1,8 +1,17 @@
 --- libpairing - Controller-Side Pairing & Worker Fleet Management
 -- Initiates 6-digit numeric pairing handshake, manages paired workers and encryption keys.
 
-local Crypto = dofile("lib/crypto/main.lua")
-local Workernet = dofile("lib/workernet/main.lua")
+local function loadFile(path)
+    local clean = path:gsub("^/+", "")
+    local ok, res = pcall(dofile, clean)
+    if ok then return res end
+    local ok2, res2 = pcall(dofile, "/" .. clean)
+    if ok2 then return res2 end
+    error("Could not load file: " .. path)
+end
+
+local Crypto = loadFile("lib/crypto/main.lua")
+local Workernet = loadFile("lib/workernet/main.lua")
 
 local Pairing = {}
 Pairing.CONFIG_FILE = "controller/pairing.cfg"

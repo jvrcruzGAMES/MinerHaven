@@ -1,9 +1,18 @@
 --- worker/pairing.lua - Interactive & Headless Pairing Handler for Worker Turtle
 -- Generates and renders a 6-digit numeric pairing code on the turtle display, then establishes session.
 
-local Device = dofile("worker/lib/device/main.lua")
-local Workernet = dofile("lib/workernet/main.lua")
-local Crypto = dofile("lib/crypto/main.lua")
+local function loadFile(path)
+    local clean = path:gsub("^/+", "")
+    local ok, res = pcall(dofile, clean)
+    if ok then return res end
+    local ok2, res2 = pcall(dofile, "/" .. clean)
+    if ok2 then return res2 end
+    error("Could not load file: " .. path)
+end
+
+local Device = loadFile("worker/lib/device/main.lua")
+local Workernet = loadFile("lib/workernet/main.lua")
+local Crypto = loadFile("lib/crypto/main.lua")
 
 local WorkerPairing = {}
 

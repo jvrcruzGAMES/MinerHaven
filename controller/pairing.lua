@@ -1,9 +1,18 @@
 --- controller/pairing.lua - Interactive Pairing Handler for Controller
 -- Prompts operator for 6-digit pairing code displayed on the turtle screen and establishes session.
 
-local Pairing = dofile("controller/lib/pairing/main.lua")
-local Workernet = dofile("lib/workernet/main.lua")
-local Crypto = dofile("lib/crypto/main.lua")
+local function loadFile(path)
+    local clean = path:gsub("^/+", "")
+    local ok, res = pcall(dofile, clean)
+    if ok then return res end
+    local ok2, res2 = pcall(dofile, "/" .. clean)
+    if ok2 then return res2 end
+    error("Could not load file: " .. path)
+end
+
+local Pairing = loadFile("controller/lib/pairing/main.lua")
+local Workernet = loadFile("lib/workernet/main.lua")
+local Crypto = loadFile("lib/crypto/main.lua")
 
 local PairingHandler = {}
 

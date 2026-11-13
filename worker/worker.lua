@@ -3,9 +3,18 @@
 -- Features End Automata teleportation, native pickaxe auto-equip, fuel stack retention (64),
 -- emergency return on 0 coal, waste placement, and Sophisticated Storage barrel unloading.
 
-local GeoScanner = require("geoscanner")
-local Workernet = dofile("lib/workernet/main.lua")
-local Device = dofile("worker/lib/device/main.lua")
+local function loadFile(path)
+    local clean = path:gsub("^/+", "")
+    local ok, res = pcall(dofile, clean)
+    if ok then return res end
+    local ok2, res2 = pcall(dofile, "/" .. clean)
+    if ok2 then return res2 end
+    error("Could not load file: " .. path)
+end
+
+local GeoScanner = loadFile("lib/geoscanner.lua")
+local Workernet = loadFile("lib/workernet/main.lua")
+local Device = loadFile("worker/lib/device/main.lua")
 
 local Worker = {}
 Worker.__index = Worker

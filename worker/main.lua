@@ -20,9 +20,18 @@ end
 
 setupPackagePath()
 
-local Device = dofile("worker/lib/device/main.lua")
-local Pairing = dofile("worker/pairing.lua")
-local Worker = dofile("worker/worker.lua")
+local function loadFile(path)
+    local clean = path:gsub("^/+", "")
+    local ok, res = pcall(dofile, clean)
+    if ok then return res end
+    local ok2, res2 = pcall(dofile, "/" .. clean)
+    if ok2 then return res2 end
+    error("Could not load file: " .. path)
+end
+
+local Device = loadFile("worker/lib/device/main.lua")
+local Pairing = loadFile("worker/pairing.lua")
+local Worker = loadFile("worker/worker.lua")
 
 local function main()
     local isPaired, pCfg = Device.isPaired()

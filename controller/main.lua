@@ -20,8 +20,17 @@ end
 
 setupPackagePath()
 
-local Controller = dofile("controller/controller.lua")
-local Dashboard = dofile("controller/dashboard.lua")
+local function loadFile(path)
+    local clean = path:gsub("^/+", "")
+    local ok, res = pcall(dofile, clean)
+    if ok then return res end
+    local ok2, res2 = pcall(dofile, "/" .. clean)
+    if ok2 then return res2 end
+    error("Could not load file: " .. path)
+end
+
+local Controller = loadFile("controller/controller.lua")
+local Dashboard = loadFile("controller/dashboard.lua")
 
 local function main()
     local ctrl = Controller.new()

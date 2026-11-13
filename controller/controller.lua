@@ -1,9 +1,18 @@
 --- Controller Core Logic - MinerHaven
 -- Manages paired workers, authoritative GeoScanner scanning, telemetry, and encrypted dispatch.
 
-local Workernet = dofile("lib/workernet/main.lua")
-local Pairing = dofile("controller/lib/pairing/main.lua")
-local Ores = dofile("controller/lib/ores/main.lua")
+local function loadFile(path)
+    local clean = path:gsub("^/+", "")
+    local ok, res = pcall(dofile, clean)
+    if ok then return res end
+    local ok2, res2 = pcall(dofile, "/" .. clean)
+    if ok2 then return res2 end
+    error("Could not load file: " .. path)
+end
+
+local Workernet = loadFile("lib/workernet/main.lua")
+local Pairing = loadFile("controller/lib/pairing/main.lua")
+local Ores = loadFile("controller/lib/ores/main.lua")
 
 local Controller = {}
 Controller.__index = Controller
