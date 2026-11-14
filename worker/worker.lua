@@ -118,7 +118,7 @@ local function loadLocalVersion()
             end
         end
     end
-    return "1.3.0"
+    return "1.3.1"
 end
 
 function Worker.new(opts)

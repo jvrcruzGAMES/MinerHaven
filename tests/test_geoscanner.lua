@@ -1747,7 +1747,7 @@ do
     local WorkerClass = dofile("worker/worker.lua")
     local workerOta = WorkerClass.new()
     workerOta.controllerId = 1
-    workerOta:handleCommand({ action = "ota_start", version = "1.3.0", totalFiles = 3 })
+    workerOta:handleCommand({ action = "ota_start", version = "1.3.1", totalFiles = 3 })
     -- 1. Shared lib chunk
     workerOta:handleCommand({
         action = "ota_chunk",
@@ -1781,7 +1781,7 @@ do
         totalFiles = 3,
         isLastChunk = true,
     })
-    workerOta:handleCommand({ action = "ota_commit", version = "1.3.0" })
+    workerOta:handleCommand({ action = "ota_commit", version = "1.3.1" })
     assertTrue(_G.fs.exists("lib/test_shared_ota.lua"), "Worker replaced shared lib via OTA commit")
     assertTrue(_G.fs.exists("worker/test_worker_ota.lua"), "Worker replaced worker file via OTA commit")
     assertTrue(_G.fs.exists("worker/lib/device/test_dev_ota.lua"), "Worker replaced worker lib via OTA commit")
@@ -1935,7 +1935,7 @@ do
     assertTrue(unloaded, "Worker unloaded inventory upon stopping at base")
 end
 
--- 13.12 Version 1.3.0 Header Display Tests for Worker and Controller
+-- 13.12 Version 1.3.1 Header Display Tests for Worker and Controller
 do
     local WorkerClass = dofile("worker/worker.lua")
     local ControllerClass = dofile("controller/controller.lua")
@@ -1953,33 +1953,33 @@ do
     end
 
     local testWorker = WorkerClass.new()
-    assertEq(testWorker.version, "1.3.0", "Worker defaults/loads version 1.3.0")
+    assertEq(testWorker.version, "1.3.1", "Worker defaults/loads version 1.3.1")
     testWorker:renderHeadlessUI()
 
     local foundWorkerVerHeader = false
     for _, str in ipairs(printedTexts) do
-        if str:find("MinerHaven Worker (v1.3.0)", 1, true) then
+        if str:find("MinerHaven Worker (v1.3.1)", 1, true) then
             foundWorkerVerHeader = true
             break
         end
     end
-    assertTrue(foundWorkerVerHeader, "Worker headless UI header displays 'MinerHaven Worker (v1.3.0)'")
+    assertTrue(foundWorkerVerHeader, "Worker headless UI header displays 'MinerHaven Worker (v1.3.1)'")
 
     -- 2. Controller Dashboard Header Display
     printedTexts = {}
     local testCtrl = ControllerClass.new()
-    assertEq(testCtrl.version, "1.3.0", "Controller defaults/loads version 1.3.0")
+    assertEq(testCtrl.version, "1.3.1", "Controller defaults/loads version 1.3.1")
     local testDash = DashboardClass.new(testCtrl)
     testDash:render()
 
     local foundCtrlVerHeader = false
     for _, str in ipairs(printedTexts) do
-        if str:find("MinerHaven Controller (v1.3.0)", 1, true) then
+        if str:find("MinerHaven Controller (v1.3.1)", 1, true) then
             foundCtrlVerHeader = true
             break
         end
     end
-    assertTrue(foundCtrlVerHeader, "Controller dashboard header displays 'MinerHaven Controller (v1.3.0)'")
+    assertTrue(foundCtrlVerHeader, "Controller dashboard header displays 'MinerHaven Controller (v1.3.1)'")
 
     _G.term.write = origWrite
     _G.term.clear = origClear

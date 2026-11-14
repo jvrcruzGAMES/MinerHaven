@@ -60,7 +60,7 @@ function Dashboard:render()
 
     -- Header Banner
     drawText(1, 1, string.rep(" ", w), bannerFg, bannerBg)
-    local verStr = tostring(self.controller and self.controller.version or "1.3.0"):gsub("^v", "")
+    local verStr = tostring(self.controller and self.controller.version or "1.3.1"):gsub("^v", "")
     drawText(2, 1, string.format("MinerHaven Controller (v%s)", verStr), bannerFg, bannerBg)
 
     -- Status Section
