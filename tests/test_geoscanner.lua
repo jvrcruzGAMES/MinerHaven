@@ -199,7 +199,8 @@ _G.http = {
 _G.fs = {
     getDir = function(p) return p:match("^(.*)/[^/]+$") or "" end,
     exists = function(p) return writtenFiles[p] ~= nil end,
-    isDir = function() return true end,
+    isDir = function(p) return writtenFiles[p] == nil end,
+    delete = function(p) writtenFiles[p] = nil end,
     makeDir = function() end,
     open = function(path, mode)
         if mode == "r" then
@@ -1746,23 +1747,46 @@ do
     local WorkerClass = dofile("worker/worker.lua")
     local workerOta = WorkerClass.new()
     workerOta.controllerId = 1
-    workerOta:handleCommand({ action = "ota_start", version = "1.2.0", totalFiles = 1 })
+    workerOta:handleCommand({ action = "ota_start", version = "1.3.0", totalFiles = 3 })
+    -- 1. Shared lib chunk
     workerOta:handleCommand({
         action = "ota_chunk",
-        path = "worker/version_ota.txt",
-        chunk = "v1.2.0-chunked",
+        path = "lib/test_shared_ota.lua",
+        chunk = "-- shared lib ota",
         chunkIndex = 1,
         totalChunks = 1,
         fileIndex = 1,
-        totalFiles = 1,
+        totalFiles = 3,
         isLastChunk = true,
     })
-    workerOta:handleCommand({ action = "ota_commit", version = "1.2.0" })
-    assertTrue(_G.fs.exists("worker/version_ota.txt"), "Worker applied streamed OTA chunked update")
-    local fCheck = _G.fs.open("worker/version_ota.txt", "r")
-    local fCheckContent = fCheck and fCheck.readAll()
-    if fCheck then fCheck.close() end
-    assertEq(fCheckContent, "v1.2.0-chunked", "Streamed OTA file content matches")
+    -- 2. Worker file chunk
+    workerOta:handleCommand({
+        action = "ota_chunk",
+        path = "worker/test_worker_ota.lua",
+        chunk = "-- worker ota",
+        chunkIndex = 1,
+        totalChunks = 1,
+        fileIndex = 2,
+        totalFiles = 3,
+        isLastChunk = true,
+    })
+    -- 3. Worker lib chunk
+    workerOta:handleCommand({
+        action = "ota_chunk",
+        path = "worker/lib/device/test_dev_ota.lua",
+        chunk = "-- worker lib ota",
+        chunkIndex = 1,
+        totalChunks = 1,
+        fileIndex = 3,
+        totalFiles = 3,
+        isLastChunk = true,
+    })
+    workerOta:handleCommand({ action = "ota_commit", version = "1.3.0" })
+    assertTrue(_G.fs.exists("lib/test_shared_ota.lua"), "Worker replaced shared lib via OTA commit")
+    assertTrue(_G.fs.exists("worker/test_worker_ota.lua"), "Worker replaced worker file via OTA commit")
+    assertTrue(_G.fs.exists("worker/lib/device/test_dev_ota.lua"), "Worker replaced worker lib via OTA commit")
+    assertTrue(not _G.fs.exists(".staging"), "Worker cleaned up .staging directory after OTA commit")
+    assertTrue(workerOta.shouldReboot, "Worker flagged shouldReboot = true")
     assertTrue(rebootCalled, "Worker initiated reboot after OTA commit")
 
     -- Test Dashboard [OTA] button and CLI 'ota' and 'flash' commands

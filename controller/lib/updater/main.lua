@@ -276,8 +276,15 @@ function Updater.loadWorkerFirmware(sourceDir)
     local files = {}
     for _, rel in ipairs(Updater.WORKER_FILES) do
         local fullPath = combinePath(sourceDir, rel)
+        local readPath = nil
         if fs.exists(fullPath) then
-            local f = fs.open(fullPath, "r")
+            readPath = fullPath
+        elseif fs.exists(rel) then
+            readPath = rel
+        end
+
+        if readPath then
+            local f = fs.open(readPath, "r")
             if f then
                 files[rel] = f.readAll()
                 f.close()
@@ -373,6 +380,7 @@ function Updater.sendOTAUpdate(net, targetWorkerId, sourceDir, progressFn)
     for relPath, content in pairs(firmwareFiles) do
         table.insert(fileList, { path = relPath, content = content })
     end
+    table.sort(fileList, function(a, b) return a.path < b.path end)
     if #fileList == 0 then
         return false, "No worker firmware files available in local firmware storage."
     end

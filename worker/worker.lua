@@ -59,19 +59,47 @@ local function getDirPath(path)
     return path:match("^(.-)/[^/]+$") or ""
 end
 
-local function copyFile(src, dest)
-    if fs and fs.copy then
-        return pcall(fs.copy, src, dest)
-    end
+local function replaceFile(src, dest)
+    local cleanDest = dest:gsub("^/+", "")
     local fIn = fs.open(src, "r")
-    if not fIn then return false end
-    local data = fIn.readAll()
+    if not fIn then return false, "Cannot open source: " .. tostring(src) end
+    local content = fIn.readAll()
     fIn.close()
-    local fOut = fs.open(dest, "w")
-    if not fOut then return false end
-    fOut.write(data)
+
+    local dDir = getDirPath(cleanDest)
+    if dDir and dDir ~= "" and not fs.exists(dDir) and fs.makeDir then
+        pcall(fs.makeDir, dDir)
+    end
+
+    if fs.exists(cleanDest) and fs.delete then
+        pcall(fs.delete, cleanDest)
+    end
+
+    local fOut = fs.open(cleanDest, "w")
+    if not fOut then return false, "Cannot open destination for writing: " .. tostring(cleanDest) end
+    fOut.write(content)
     fOut.close()
     return true
+end
+
+local function listFilesRecursive(dir, prefix)
+    prefix = prefix or ""
+    local files = {}
+    if not fs or not fs.exists or not fs.exists(dir) or not fs.isDir or not fs.isDir(dir) then
+        return files
+    end
+    local entries = fs.list(dir) or {}
+    for _, item in ipairs(entries) do
+        local full = combinePath(dir, item)
+        local rel = (prefix == "") and item or (prefix .. "/" .. item)
+        if fs.isDir(full) then
+            local sub = listFilesRecursive(full, rel)
+            for _, s in ipairs(sub) do table.insert(files, s) end
+        else
+            table.insert(files, rel)
+        end
+    end
+    return files
 end
 
 local function loadLocalVersion()
@@ -1169,7 +1197,8 @@ function Worker:handleCommand(payload)
         self.running = false
         self.phase = "UPDATING (OTA)"
         local stagingDir = ".staging"
-        local stagedPath = combinePath(stagingDir, payload.path)
+        local cleanPath = tostring(payload.path or ""):gsub("^/+", "")
+        local stagedPath = combinePath(stagingDir, cleanPath)
         local sDir = getDirPath(stagedPath)
         if sDir and sDir ~= "" and not fs.exists(sDir) and fs.makeDir then fs.makeDir(sDir) end
 
@@ -1182,12 +1211,12 @@ function Worker:handleCommand(payload)
 
         self.otaStagedFiles = self.otaStagedFiles or {}
         if payload.isLastChunk then
-            self.otaStagedFiles[payload.path] = true
+            self.otaStagedFiles[cleanPath] = true
         end
 
         self.lastAction = string.format("OTA [%d/%d]: %s (%d/%d)",
             payload.fileIndex or 0, payload.totalFiles or 0,
-            payload.path or "",
+            cleanPath,
             payload.chunkIndex or 0, payload.totalChunks or 0)
         self:renderHeadlessUI()
     elseif action == "ota_commit" then
@@ -1198,24 +1227,43 @@ function Worker:handleCommand(payload)
         self:queryStateFromController()
 
         local stagingDir = ".staging"
-        local count = 0
-        for relPath, _ in pairs(self.otaStagedFiles or {}) do
-            local destPath = relPath
-            local destDir = getDirPath(destPath)
-            if destDir and destDir ~= "" and not fs.exists(destDir) and fs.makeDir then fs.makeDir(destDir) end
-            local stagedPath = combinePath(stagingDir, relPath)
-            if fs.exists(destPath) and fs.delete then pcall(fs.delete, destPath) end
-            copyFile(stagedPath, destPath)
-            count = count + 1
-        end
-        if fs.delete then pcall(fs.delete, stagingDir) end
+        local replacedCount = 0
 
-        self.lastAction = string.format("OTA update complete (%d files). Rebooting...", count)
+        -- Collect all staged file paths
+        local candidates = {}
+        for rel, _ in pairs(self.otaStagedFiles or {}) do
+            candidates[rel:gsub("^/+", "")] = true
+        end
+        for _, rel in ipairs(listFilesRecursive(stagingDir)) do
+            candidates[rel:gsub("^/+", "")] = true
+        end
+
+        -- Replace existing worker files with updated staged firmware files
+        for relPath, _ in pairs(candidates) do
+            local stagedPath = combinePath(stagingDir, relPath)
+            if fs.exists(stagedPath) and (self.otaStagedFiles[relPath] or not (fs.isDir and fs.isDir(stagedPath))) then
+                local ok, err = replaceFile(stagedPath, relPath)
+                if ok then
+                    replacedCount = replacedCount + 1
+                end
+            end
+        end
+
+        -- Clean up staging directory
+        if fs.exists(stagingDir) and fs.delete then
+            pcall(fs.delete, stagingDir)
+        end
+        self.otaStagedFiles = {}
+
+        self.lastAction = string.format("OTA update complete (%d files). Rebooting...", replacedCount)
+        self.phase = "REBOOTING"
         self:renderHeadlessUI()
         self:queryStateFromController()
+
+        self.shouldReboot = true
         if os and os.sleep then pcall(os.sleep, 1) end
         if os and os.reboot then pcall(os.reboot) end
-        return
+        return true
     elseif action == "ota_update" then
         self.running = false
         self.oreQueue = {}
@@ -1232,7 +1280,8 @@ function Worker:handleCommand(payload)
         local fileCount = 0
         local writeErr = nil
         for relPath, content in pairs(files) do
-            local stagedPath = combinePath(stagingDir, relPath)
+            local cleanPath = relPath:gsub("^/+", "")
+            local stagedPath = combinePath(stagingDir, cleanPath)
             local sDir = getDirPath(stagedPath)
             if sDir and sDir ~= "" and not fs.exists(sDir) and fs.makeDir then fs.makeDir(sDir) end
             local f = fs.open(stagedPath, "w")
@@ -1241,7 +1290,7 @@ function Worker:handleCommand(payload)
                 f.close()
                 fileCount = fileCount + 1
             else
-                writeErr = "Failed to write staged file: " .. tostring(relPath)
+                writeErr = "Failed to write staged file: " .. tostring(cleanPath)
                 break
             end
         end
@@ -1251,26 +1300,30 @@ function Worker:handleCommand(payload)
             self.phase = "IDLE (Remote)"
             self:renderHeadlessUI()
             self:queryStateFromController()
-            return
+            return false
         end
 
-        -- Staging succeeded: replace files
+        -- Staging succeeded: replace old files with new firmware
+        local replacedCount = 0
         for relPath, _ in pairs(files) do
-            local destPath = relPath
-            local destDir = getDirPath(destPath)
-            if destDir and destDir ~= "" and not fs.exists(destDir) and fs.makeDir then fs.makeDir(destDir) end
-            local stagedPath = combinePath(stagingDir, relPath)
-            if fs.exists(destPath) and fs.delete then pcall(fs.delete, destPath) end
-            copyFile(stagedPath, destPath)
+            local cleanPath = relPath:gsub("^/+", "")
+            local stagedPath = combinePath(stagingDir, cleanPath)
+            if fs.exists(stagedPath) and not (fs.isDir and fs.isDir(stagedPath)) then
+                local ok = replaceFile(stagedPath, cleanPath)
+                if ok then replacedCount = replacedCount + 1 end
+            end
         end
         if fs.delete then pcall(fs.delete, stagingDir) end
 
-        self.lastAction = string.format("OTA update complete (%d files). Rebooting...", fileCount)
+        self.lastAction = string.format("OTA update complete (%d files). Rebooting...", replacedCount)
+        self.phase = "REBOOTING"
         self:renderHeadlessUI()
         self:queryStateFromController()
+
+        self.shouldReboot = true
         if os and os.sleep then pcall(os.sleep, 1) end
         if os and os.reboot then pcall(os.reboot) end
-        return
+        return true
     end
     self:renderHeadlessUI()
     self:sendTelemetry()
@@ -1446,6 +1499,11 @@ function Worker:run()
             elseif msg.type == "ore_locations" then
                 self:handleOreBatch(msg)
             end
+        end
+
+        if self.shouldReboot then
+            if os and os.reboot then pcall(os.reboot) end
+            break
         end
 
         if self.running then
