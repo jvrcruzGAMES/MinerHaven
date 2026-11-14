@@ -146,12 +146,19 @@ local function joinPath(base, rel)
     return base:gsub("/+$", "") .. "/" .. rel:gsub("^/+", "")
 end
 
+local NO_CACHE_HEADERS = {
+    ["Cache-Control"] = "no-cache, no-store, must-revalidate",
+    ["Pragma"] = "no-cache",
+    ["Expires"] = "0",
+    ["User-Agent"] = "MinerHaven-Installer",
+}
+
 local function downloadFile(remotePath, localPath)
-    local cacheBuster = (os and type(os.epoch) == "function") and tostring(os.epoch("utc")) or tostring(math.random(100000, 999999))
+    local cacheBuster = (os and type(os.epoch) == "function") and tostring(os.epoch("utc")) or tostring(math.random(10000000, 99999999))
     local url = BASE_URL .. "/" .. remotePath .. "?v=" .. cacheBuster
     logInfo("Downloading " .. remotePath .. " -> " .. localPath)
 
-    local response, err = http.get(url)
+    local response, err = http.get(url, NO_CACHE_HEADERS)
     if not response then
         logError("Failed to download " .. url .. ": " .. tostring(err))
         return false

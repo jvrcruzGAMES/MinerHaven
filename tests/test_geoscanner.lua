@@ -1911,4 +1911,55 @@ do
     assertTrue(unloaded, "Worker unloaded inventory upon stopping at base")
 end
 
+-- 13.12 Version 1.3.0 Header Display Tests for Worker and Controller
+do
+    local WorkerClass = dofile("worker/worker.lua")
+    local ControllerClass = dofile("controller/controller.lua")
+    local DashboardClass = dofile("controller/dashboard.lua")
+
+    -- 1. Worker Headless UI Header Display
+    local printedTexts = {}
+    local origWrite = _G.term.write
+    local origClear = _G.term.clear
+    local origSetCursorPos = _G.term.setCursorPos
+    _G.term.clear = function() end
+    _G.term.setCursorPos = function(x, y) end
+    _G.term.write = function(txt)
+        table.insert(printedTexts, tostring(txt))
+    end
+
+    local testWorker = WorkerClass.new()
+    assertEq(testWorker.version, "1.3.0", "Worker defaults/loads version 1.3.0")
+    testWorker:renderHeadlessUI()
+
+    local foundWorkerVerHeader = false
+    for _, str in ipairs(printedTexts) do
+        if str:find("MinerHaven Worker (v1.3.0)", 1, true) then
+            foundWorkerVerHeader = true
+            break
+        end
+    end
+    assertTrue(foundWorkerVerHeader, "Worker headless UI header displays 'MinerHaven Worker (v1.3.0)'")
+
+    -- 2. Controller Dashboard Header Display
+    printedTexts = {}
+    local testCtrl = ControllerClass.new()
+    assertEq(testCtrl.version, "1.3.0", "Controller defaults/loads version 1.3.0")
+    local testDash = DashboardClass.new(testCtrl)
+    testDash:render()
+
+    local foundCtrlVerHeader = false
+    for _, str in ipairs(printedTexts) do
+        if str:find("MinerHaven Controller (v1.3.0)", 1, true) then
+            foundCtrlVerHeader = true
+            break
+        end
+    end
+    assertTrue(foundCtrlVerHeader, "Controller dashboard header displays 'MinerHaven Controller (v1.3.0)'")
+
+    _G.term.write = origWrite
+    _G.term.clear = origClear
+    _G.term.setCursorPos = origSetCursorPos
+end
+
 print(("ALL %d ASSERTIONS PASSED!"):format(passed))

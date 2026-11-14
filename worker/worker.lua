@@ -74,9 +74,30 @@ local function copyFile(src, dest)
     return true
 end
 
+local function loadLocalVersion()
+    if fs and fs.exists and fs.exists("version.json") then
+        local f = fs.open("version.json", "r")
+        if f then
+            local raw = f.readAll()
+            f.close()
+            local ok, parsed = pcall(textutils and textutils.unserializeJSON or Workernet.unserialize, raw)
+            if ok and type(parsed) == "table" then
+                if parsed.worker and parsed.worker.version then
+                    return tostring(parsed.worker.version)
+                elseif parsed.version then
+                    return tostring(parsed.version)
+                end
+            end
+        end
+    end
+    return "1.3.0"
+end
+
 function Worker.new(opts)
     opts = opts or {}
     local self = setmetatable({}, Worker)
+
+    self.version = opts.version or loadLocalVersion()
 
     local isPaired, pCfg = Device.isPaired()
     self.pairingConfig = pCfg or {}
@@ -166,7 +187,8 @@ function Worker:renderHeadlessUI()
 
     -- Title Bar
     pText(1, 1, string.rep("=", w), colors and colors.cyan or 512)
-    pText(2, 2, "MinerHaven Worker [HEADLESS]", colors and colors.yellow or 16)
+    local verStr = tostring(self.version or loadLocalVersion()):gsub("^v", "")
+    pText(2, 2, string.format("MinerHaven Worker (v%s)", verStr), colors and colors.yellow or 16)
     pText(1, 3, string.rep("=", w), colors and colors.cyan or 512)
 
     -- Status details

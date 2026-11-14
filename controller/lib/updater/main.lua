@@ -99,7 +99,14 @@ function Updater.compareVersions(v1, v2)
     return 0
 end
 
---- Check GitHub Releases for the latest version.
+local NO_CACHE_HEADERS = {
+    ["Cache-Control"] = "no-cache, no-store, must-revalidate",
+    ["Pragma"] = "no-cache",
+    ["Expires"] = "0",
+    ["User-Agent"] = "MinerHaven-Updater",
+}
+
+--- Check GitHub Releases or Raw repository for the latest version without using stale cache.
 -- @treturn boolean hasUpdate
 -- @treturn string latestVersion
 -- @treturn string currentVersion
@@ -112,29 +119,69 @@ function Updater.checkForUpdates()
 
     local latestVer = nil
     local releaseInfo = {}
+    local latestCommit = nil
 
-    -- 1. Try GitHub Releases API
-    local apiUrl = string.format("https://api.github.com/repos/%s/%s/releases/latest", Updater.REPO_USER, Updater.REPO_NAME)
-    local h, err = http.get(apiUrl, { ["User-Agent"] = "MinerHaven-Updater" })
-    if h then
-        local body = h.readAll()
-        h.close()
-        local ok, data = pcall(textutils.unserializeJSON or Workernet.unserialize, body)
-        if ok and type(data) == "table" and data.tag_name then
-            latestVer = tostring(data.tag_name):gsub("^v", "")
-            releaseInfo = data
+    -- 1. Query GitHub Commits API for latest commit SHA on default branch (uncached direct commit ref)
+    local commitUrl = string.format("https://api.github.com/repos/%s/%s/commits/%s",
+        Updater.REPO_USER, Updater.REPO_NAME, Updater.DEFAULT_BRANCH)
+    local ch = http.get(commitUrl, NO_CACHE_HEADERS)
+    if ch then
+        local cbody = ch.readAll()
+        ch.close()
+        local ok, cdata = pcall(textutils and textutils.unserializeJSON or Workernet.unserialize, cbody)
+        if ok and type(cdata) == "table" and cdata.sha then
+            latestCommit = cdata.sha
+            Updater.LATEST_COMMIT = latestCommit
         end
     end
 
-    -- 2. Fallback to raw version.json if API is rate-limited or unavailable
+    -- 2. Query GitHub Contents API for version.json (Accept: application/vnd.github.raw bypasses CDN caching)
+    local contentsUrl = string.format("https://api.github.com/repos/%s/%s/contents/%s?ref=%s",
+        Updater.REPO_USER, Updater.REPO_NAME, Updater.VERSION_FILE, latestCommit or Updater.DEFAULT_BRANCH)
+    local rawHeaders = {
+        ["Accept"] = "application/vnd.github.raw",
+        ["User-Agent"] = "MinerHaven-Updater",
+        ["Cache-Control"] = "no-cache, no-store, must-revalidate",
+        ["Pragma"] = "no-cache",
+        ["Expires"] = "0",
+    }
+    local vh = http.get(contentsUrl, rawHeaders)
+    if vh then
+        local vbody = vh.readAll()
+        vh.close()
+        local ok, vdata = pcall(textutils and textutils.unserializeJSON or Workernet.unserialize, vbody)
+        if ok and type(vdata) == "table" and vdata.version then
+            latestVer = tostring(vdata.version):gsub("^v", "")
+            releaseInfo = vdata
+        end
+    end
+
+    -- 3. If Contents API didn't resolve, try GitHub Releases API
     if not latestVer then
+        local apiUrl = string.format("https://api.github.com/repos/%s/%s/releases/latest", Updater.REPO_USER, Updater.REPO_NAME)
+        local h = http.get(apiUrl, NO_CACHE_HEADERS)
+        if h then
+            local body = h.readAll()
+            h.close()
+            local ok, data = pcall(textutils and textutils.unserializeJSON or Workernet.unserialize, body)
+            if ok and type(data) == "table" and data.tag_name then
+                latestVer = tostring(data.tag_name):gsub("^v", "")
+                releaseInfo = data
+            end
+        end
+    end
+
+    -- 4. Fallback to raw version.json using commit SHA or epoch nonce
+    if not latestVer then
+        local ref = latestCommit or Updater.DEFAULT_BRANCH
+        local nonce = (os and type(os.epoch) == "function") and tostring(os.epoch("utc")) or tostring(math.random(10000000, 99999999))
         local rawUrl = string.format("https://raw.githubusercontent.com/%s/%s/%s/version.json?_t=%s",
-            Updater.REPO_USER, Updater.REPO_NAME, Updater.DEFAULT_BRANCH, tostring(os.time and os.time() or 1))
-        local rh = http.get(rawUrl)
+            Updater.REPO_USER, Updater.REPO_NAME, ref, nonce)
+        local rh = http.get(rawUrl, NO_CACHE_HEADERS)
         if rh then
             local rbody = rh.readAll()
             rh.close()
-            local ok, rdata = pcall(textutils.unserializeJSON or Workernet.unserialize, rbody)
+            local ok, rdata = pcall(textutils and textutils.unserializeJSON or Workernet.unserialize, rbody)
             if ok and type(rdata) == "table" and rdata.version then
                 latestVer = tostring(rdata.version):gsub("^v", "")
                 releaseInfo = rdata
@@ -150,14 +197,14 @@ function Updater.checkForUpdates()
     return isNewer, latestVer, currentVer, releaseInfo
 end
 
---- Download a file from GitHub repository.
+--- Download a file from GitHub repository with cache busting.
 function Updater.downloadFile(remotePath, destPath, branch)
-    branch = branch or Updater.DEFAULT_BRANCH
-    local cacheBuster = (os and type(os.epoch) == "function") and tostring(os.epoch("utc")) or tostring(math.random(100000, 999999))
+    branch = branch or Updater.LATEST_COMMIT or Updater.DEFAULT_BRANCH
+    local nonce = (os and type(os.epoch) == "function") and tostring(os.epoch("utc")) or tostring(math.random(10000000, 99999999))
     local url = string.format("https://raw.githubusercontent.com/%s/%s/%s/%s?v=%s",
-        Updater.REPO_USER, Updater.REPO_NAME, branch, remotePath, cacheBuster)
+        Updater.REPO_USER, Updater.REPO_NAME, branch, remotePath, nonce)
 
-    local resp, err = http.get(url)
+    local resp, err = http.get(url, NO_CACHE_HEADERS)
     if not resp then
         return false, "Failed to download " .. url .. ": " .. tostring(err)
     end

@@ -52,11 +52,31 @@ function Controller.saveConfig(cfg, path)
     return true
 end
 
+local function loadLocalVersion()
+    if fs and fs.exists and fs.exists("version.json") then
+        local f = fs.open("version.json", "r")
+        if f then
+            local raw = f.readAll()
+            f.close()
+            local ok, parsed = pcall(textutils and textutils.unserializeJSON or Workernet.unserialize, raw)
+            if ok and type(parsed) == "table" then
+                if parsed.controller and parsed.controller.version then
+                    return tostring(parsed.controller.version)
+                elseif parsed.version then
+                    return tostring(parsed.version)
+                end
+            end
+        end
+    end
+    return "1.3.0"
+end
+
 --- Create a new Controller instance.
 function Controller.new(opts)
     opts = opts or {}
     local self = setmetatable({}, Controller)
 
+    self.version = opts.version or loadLocalVersion()
     self.config = Controller.loadConfig(opts.configPath)
     if opts.scanRadius then self.config.scanRadius = tonumber(opts.scanRadius) end
 
