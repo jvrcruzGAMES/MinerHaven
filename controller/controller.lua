@@ -94,6 +94,7 @@ function Controller:init()
         local idNum = tonumber(wId)
         self.workers[idNum] = {
             name = info.name or ("Turtle " .. tostring(wId)),
+            desiredState = self.config.running and "MINING" or "STOPPED",
             telemetry = {
                 phase = "Paired",
                 x = 0, y = 0, z = 0,
@@ -197,6 +198,9 @@ end
 function Controller:startWorkers()
     self.config.running = true
     self:persist()
+    for _, entry in pairs(self.workers) do
+        entry.desiredState = "MINING"
+    end
     self:broadcastCommand("start")
     self:sendOreLocations()
 end
@@ -205,7 +209,48 @@ end
 function Controller:stopWorkers()
     self.config.running = false
     self:persist()
+    for _, entry in pairs(self.workers) do
+        entry.desiredState = "STOPPED"
+    end
     self:broadcastCommand("stop")
+end
+
+--- Set desired state for a specific worker.
+function Controller:setWorkerDesiredState(workerId, state)
+    local targetNum = tonumber(workerId) or workerId
+    local entry = self.workers[targetNum] or self.workers[tostring(targetNum)]
+    if not entry then
+        entry = {
+            name = "Turtle " .. tostring(workerId),
+            telemetry = {},
+            lastSeen = 0,
+        }
+        self.workers[targetNum] = entry
+    end
+    entry.desiredState = state
+    self.lastLog = string.format("Worker %s desired state set to %s", tostring(workerId), state)
+
+    -- Immediately push state_response to that worker
+    self.net:send(targetNum, {
+        type = "state_response",
+        desiredState = state,
+        running = (state == "MINING"),
+        scanRadius = self.config.scanRadius or 12,
+        turtleOffset = self.ores.turtleOffset,
+    })
+
+    -- Also push standard command
+    local cmdAction = (state == "MINING") and "start" or ((state == "RETURN_HOME") and "return_home" or "stop")
+    self.net:send(targetNum, {
+        type = "command",
+        action = cmdAction,
+        running = (state == "MINING"),
+    })
+
+    if state == "MINING" then
+        self:sendOreLocations(targetNum)
+    end
+    return true
 end
 
 --- Send set home command to a specific worker.
@@ -252,6 +297,7 @@ function Controller:handlePacket(payload, fromId)
     if not workerEntry then
         workerEntry = {
             name = "Turtle " .. tostring(fromId),
+            desiredState = self.config.running and "MINING" or "STOPPED",
             telemetry = {},
             lastSeen = 0,
         }
@@ -260,18 +306,38 @@ function Controller:handlePacket(payload, fromId)
     workerEntry.lastSeen = os.clock and os.clock() or os.time()
 
     local pType = payload.type
-    if pType == "telemetry" then
+    if pType == "state_query" or pType == "telemetry" then
         workerEntry.telemetry = {
             phase = payload.phase or "Active",
             x = payload.x or 0,
             y = payload.y or 0,
             z = payload.z or 0,
+            dir = payload.dir or 0,
             fuel = payload.fuel or "?",
             coal = payload.coal or 0,
             usedSlots = payload.usedSlots or 0,
             lastAction = payload.lastAction or "Working...",
             currentTarget = payload.currentTarget,
+            hasOres = payload.hasOres,
+            oreCount = payload.oreCount or 0,
         }
+
+        if pType == "state_query" then
+            local desired = workerEntry.desiredState or (self.config.running and "MINING" or "STOPPED")
+            local response = {
+                type = "state_response",
+                desiredState = desired,
+                running = (desired == "MINING"),
+                scanRadius = self.config.scanRadius or 12,
+                turtleOffset = self.ores.turtleOffset,
+            }
+            self.net:send(fromId, response)
+
+            -- Proactively dispatch ores if worker is in MINING state and out of ores
+            if desired == "MINING" and (payload.hasOres == false or (payload.oreCount or 0) == 0) then
+                self:sendOreLocations(fromId)
+            end
+        end
     elseif pType == "request_ores" then
         -- Turtle requested ores. Authoritative radius: ALWAYS use self.config.scanRadius!
         self:sendOreLocations(fromId)

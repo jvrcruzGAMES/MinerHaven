@@ -922,22 +922,87 @@ end
 -- Encrypted Communications with Paired Controller
 --------------------------------------------------------------------------------
 
-function Worker:sendTelemetry()
-    if not self.controllerId then return end
+function Worker:queryStateFromController()
+    if not self.controllerId then return false end
     local fuel = turtle and turtle.getFuelLevel and turtle.getFuelLevel() or 0
     local payload = {
-        type = "telemetry",
+        type = "state_query",
+        workerId = os.getComputerID and os.getComputerID() or 0,
         phase = self.phase,
+        running = self.running,
         x = self.pos.x,
         y = self.pos.y,
         z = self.pos.z,
+        dir = self.pos.dir,
         fuel = fuel,
         coal = self:getCoalCount(),
         usedSlots = self:getUsedSlotCount(),
         lastAction = self.lastAction,
         currentTarget = self.currentTarget,
+        hasOres = (#self.oreQueue > 0),
+        oreCount = #self.oreQueue,
     }
-    self.net:send(self.controllerId, payload)
+    return self.net:send(self.controllerId, payload)
+end
+
+function Worker:sendTelemetry()
+    return self:queryStateFromController()
+end
+
+function Worker:handleStateResponse(payload)
+    if not payload or type(payload) ~= "table" then return end
+    local desired = payload.desiredState
+    if not desired and payload.running ~= nil then
+        desired = payload.running and "MINING" or "STOPPED"
+    end
+
+    if payload.scanRadius and self.lastScanRadius ~= payload.scanRadius then
+        self.lastScanRadius = payload.scanRadius
+    end
+
+    if desired == "MINING" then
+        if not self.running then
+            if self:hasCoal() then
+                self.running = true
+                self.phase = "MINING"
+                self.lastAction = "State synchronized: MINING (Controller)"
+                self:renderHeadlessUI()
+                if #self.oreQueue == 0 then
+                    self:requestOresFromController()
+                end
+            else
+                self.phase = "IDLE (Needs Coal)"
+                self.lastAction = "Controller requested MINING but turtle has no coal."
+                self:renderHeadlessUI()
+            end
+        end
+    elseif desired == "STOPPED" or desired == "IDLE" then
+        if self.running then
+            self.running = false
+            self.oreQueue = {}
+            self.phase = "STOPPED"
+            self.lastAction = "State synchronized: STOPPED by Controller. Teleporting home..."
+            self:renderHeadlessUI()
+            self:returnToHome()
+            self:unloadToBarrel()
+            self.phase = "IDLE (Remote)"
+            self.lastAction = "Stopped at Base by Controller."
+            self:renderHeadlessUI()
+        end
+    elseif desired == "RETURN_HOME" then
+        if self.running or self.pos.x ~= self.home.x or self.pos.y ~= self.home.y or self.pos.z ~= self.home.z then
+            self.running = false
+            self.oreQueue = {}
+            self.phase = "RETURNING HOME"
+            self.lastAction = "Returning home by Controller sync..."
+            self:renderHeadlessUI()
+            self:returnToHome()
+            self:unloadToBarrel()
+            self.phase = "IDLE (Remote)"
+            self.lastAction = "Returned Home by Controller."
+            self:renderHeadlessUI()
+        end
+    end
 end
 
 function Worker:requestOresFromController()
@@ -945,7 +1010,7 @@ function Worker:requestOresFromController()
     self.phase = "WAITING FOR ORES"
     self.lastAction = "Requesting ores from Controller..."
     self:renderHeadlessUI()
-    self:sendTelemetry()
+    self:queryStateFromController()
 
     -- Notice: We do NOT send any scan radius, so the Controller uses its authoritative radius!
     local payload = {
@@ -953,7 +1018,7 @@ function Worker:requestOresFromController()
     }
     self.net:send(self.controllerId, payload)
 
-    -- Wait for ore_locations reply
+    -- Wait for ore_locations or state_response reply
     local timeout = 5.0
     local deadline = os.clock and (os.clock() + timeout) or (os.time() + timeout)
 
@@ -966,8 +1031,16 @@ function Worker:requestOresFromController()
             if raw.type == "ore_locations" then
                 self:handleOreBatch(raw)
                 return true
+            elseif raw.type == "state_response" then
+                self:handleStateResponse(raw)
+                if not self.running then
+                    return false
+                end
             elseif raw.type == "command" then
                 self:handleCommand(raw)
+                if not self.running then
+                    return false
+                end
             end
         end
     end
@@ -1143,6 +1216,11 @@ function Worker:mineToTarget(target)
                 if not self.running then
                     return false, "stopped"
                 end
+            elseif msg.type == "state_response" then
+                self:handleStateResponse(msg)
+                if not self.running then
+                    return false, "stopped"
+                end
             elseif msg.type == "ore_locations" then
                 self:handleOreBatch(msg)
             end
@@ -1150,6 +1228,11 @@ function Worker:mineToTarget(target)
 
         if not self.running then
             return false, "stopped"
+        end
+
+        -- Query controller state periodically during mining navigation
+        if steps % 4 == 0 then
+            self:queryStateFromController()
         end
 
         local dx = target.x - self.pos.x
@@ -1241,9 +1324,9 @@ function Worker:run()
     end
 
     self:renderHeadlessUI()
-    self:sendTelemetry()
+    self:queryStateFromController()
 
-    local lastTelemetryTime = os.clock and os.clock() or os.time()
+    local lastStateQueryTime = 0
 
     while true do
         self:renderHeadlessUI()
@@ -1253,13 +1336,20 @@ function Worker:run()
             self.phase = "EMERGENCY: NO COAL"
             self.lastAction = "No coal in inventory! Teleporting home immediately..."
             self:renderHeadlessUI()
-            self:sendTelemetry()
+            self:queryStateFromController()
             self:returnToHome()
             self:unloadToBarrel()
             self.running = false
             self.phase = "IDLE (Needs Coal)"
             self:renderHeadlessUI()
-            self:sendTelemetry()
+            self:queryStateFromController()
+        end
+
+        -- Constant communication model: query state from controller every 1.0s
+        local now = os.clock and os.clock() or os.time()
+        if now - lastStateQueryTime >= 1.0 then
+            self:queryStateFromController()
+            lastStateQueryTime = now
         end
 
         -- Check for incoming remote messages
@@ -1267,16 +1357,11 @@ function Worker:run()
         if msg and self:isSenderController(fromId) then
             if msg.type == "command" then
                 self:handleCommand(msg)
+            elseif msg.type == "state_response" then
+                self:handleStateResponse(msg)
             elseif msg.type == "ore_locations" then
                 self:handleOreBatch(msg)
             end
-        end
-
-        -- Periodic telemetry every 2.0 seconds
-        local now = os.clock and os.clock() or os.time()
-        if now - lastTelemetryTime >= 2.0 then
-            self:sendTelemetry()
-            lastTelemetryTime = now
         end
 
         if self.running then
@@ -1284,7 +1369,7 @@ function Worker:run()
                 self.phase = "INVENTORY FULL"
                 self.lastAction = "Inventory full (16/16). Returning home to deposit ores..."
                 self:renderHeadlessUI()
-                self:sendTelemetry()
+                self:queryStateFromController()
                 self:returnToHome()
                 self:unloadToBarrel()
                 self:requestOresFromController()
@@ -1292,11 +1377,12 @@ function Worker:run()
                 -- Ask controller for more ores
                 local ok = self:requestOresFromController()
                 if not ok or #self.oreQueue == 0 then
-                    self.phase = "IDLE (No Ores)"
-                    self.lastAction = "No ores in scan. Waiting at base..."
+                    self.phase = "WAITING FOR ORES (At Base)"
+                    self.lastAction = "No ores in scan. Waiting at base for Controller..."
                     self:returnToHome()
                     self:unloadToBarrel()
-                    self.running = false
+                    -- Do not permanently kill self.running; query controller
+                    if os.sleep then os.sleep(0.5) end
                 end
             else
                 -- Mine next ore in queue
@@ -1311,7 +1397,7 @@ function Worker:run()
                     self:unloadToBarrel()
                     self.running = false
                 end
-                self:sendTelemetry()
+                self:queryStateFromController()
             end
         else
             self.phase = "IDLE (Remote)"

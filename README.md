@@ -70,6 +70,10 @@ MinerHaven/
    - **Over-The-Air (OTA) Updates (`ota [workerId]` / `[OTA]` Button)**: The controller pushes the complete worker firmware payload over encrypted Workernet. The worker stages files into `.staging/`, replaces the local installation, and reboots cleanly.
    - **Controller GitHub Releases Update System**: On startup, the controller queries GitHub Releases (`/releases/latest` or `version.json`), notifying the operator if a newer version is available with a `(Y/n)` prompt. Manual updates can also be triggered at any time via the `update` command.
    - **Bundled Worker Firmware**: Installing or upgrading the controller automatically bundles the latest worker firmware in `firmware/worker/` for instant flashing and OTA deployment.
+11. **Constant Bidirectional Communication Model (`state_query` / `state_response`)**:
+   - Workers continuously query their paired controller (`state_query`), transmitting real-time coordinates, fuel, inventory slots, and current phase while asking what operational state they should be in.
+   - The controller replies (`state_response`) confirming the authoritative desired state (`MINING` vs `STOPPED` / `IDLE`), scan radius, and proactive ore distribution.
+   - Standard asynchronous controller-to-worker commands (`start`, `stop`, `sethome`, `unpair`, `ota_update`) execute concurrently, ensuring both zero-latency manual command execution and continuous state synchronization even through packet drops or reboots.
 
 ---
 

@@ -230,9 +230,19 @@ function Dashboard:handleCommand(cmd)
     local root = parts[1]:lower()
 
     if root == "start" then
-        self:executeAction("start")
+        local targetId = tonumber(parts[2]) or parts[2]
+        if targetId then
+            self.controller:setWorkerDesiredState(targetId, "MINING")
+        else
+            self:executeAction("start")
+        end
     elseif root == "stop" then
-        self:executeAction("stop")
+        local targetId = tonumber(parts[2]) or parts[2]
+        if targetId then
+            self.controller:setWorkerDesiredState(targetId, "STOPPED")
+        else
+            self:executeAction("stop")
+        end
     elseif root == "scan" then
         self:executeAction("scan")
     elseif root == "radius" or root == "rad" then

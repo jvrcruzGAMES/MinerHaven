@@ -1790,4 +1790,112 @@ do
     assertTrue(mockDashboardCtrl2.lastLog:find("Flashed", 1, true) ~= nil, "CLI 'flash right' flashed side")
 end
 
+-- 13.11 Constant Communication Model: Worker State Query & Controller State Response
+do
+    local WorkerClass = dofile("worker/worker.lua")
+    local ControllerClass = dofile("controller/controller.lua")
+
+    local testNetBus = {}
+    local function makeModem(id)
+        return {
+            isOpen = function() return true end,
+            open = function() end,
+            close = function() end,
+            transmit = function(ch, rep, pkt)
+                table.insert(testNetBus, { ch = ch, rep = rep, pkt = pkt })
+            end,
+        }
+    end
+
+    local cNet = Workernet.new({ modem = makeModem(1), localId = 1 })
+    local wNet = Workernet.new({ modem = makeModem(8), localId = 8 })
+    local testKey = Crypto.sha256("test_session_sync_key")
+    cNet:setSessionKey(8, testKey)
+    wNet:setSessionKey(1, testKey)
+
+    local ctrl = ControllerClass.new({ scanRadius = 16 })
+    ctrl.net = cNet
+    ctrl.config.running = true
+    ctrl.workers[8] = {
+        name = "Turtle 8",
+        desiredState = "MINING",
+        telemetry = { phase = "Idle" },
+        lastSeen = 0,
+    }
+
+    local worker = WorkerClass.new()
+    worker.net = wNet
+    worker.controllerId = 1
+    worker.running = false
+    worker.phase = "IDLE (Remote)"
+    worker.pos = { x = 4, y = -10, z = 6, dir = 1 }
+
+    -- 1. Worker sends state_query to controller
+    worker:queryStateFromController()
+    assertEq(#testNetBus, 1, "Worker transmitted encrypted state_query packet")
+
+    -- 2. Controller pulls and processes the packet
+    local rawPkt = testNetBus[1].pkt
+    local payload, fromId = cNet:unpackPacket(rawPkt)
+    assertEq(payload.type, "state_query", "Packet type is state_query")
+    assertEq(fromId, 8, "Sender ID matches worker 8")
+
+    -- Controller handles packet: updates telemetry and sends state_response
+    ctrl:handlePacket(payload, fromId)
+    local wEntry = ctrl.workers[8]
+    assertEq(wEntry.telemetry.phase, "IDLE (Remote)", "Controller updated telemetry phase")
+    assertEq(wEntry.telemetry.x, 4, "Controller updated telemetry X")
+    assertEq(wEntry.telemetry.y, -10, "Controller updated telemetry Y")
+    assertEq(wEntry.telemetry.z, 6, "Controller updated telemetry Z")
+    assertTrue(wEntry.lastSeen > 0, "Controller updated lastSeen timestamp")
+
+    -- Verify Controller replied with state_response and proactive ore_locations
+    assertTrue(#testNetBus >= 2, "Controller sent back encrypted response packets")
+    local respPkt = testNetBus[2].pkt
+    local respPayload, respFrom = wNet:unpackPacket(respPkt)
+    assertEq(respPayload.type, "state_response", "Response type is state_response")
+    assertEq(respPayload.desiredState, "MINING", "Controller directed worker to MINING state")
+    assertEq(respPayload.scanRadius, 16, "Response included authoritative scan radius")
+
+    if #testNetBus >= 3 then
+        local orePkt = testNetBus[3].pkt
+        local orePayload = wNet:unpackPacket(orePkt)
+        assertEq(orePayload.type, "ore_locations", "Controller proactively dispatched ore_locations to idle mining worker")
+    end
+
+    -- 3. Worker handles state_response: transitions to MINING
+    _G.turtle.getItemDetail = function(slot)
+        if slot == 1 then return { name = "minecraft:coal", count = 32 } end
+        return nil
+    end
+    worker.oreQueue = { { name = "minecraft:diamond_ore", x = 4, y = -10, z = 7 } }
+    worker:handleStateResponse(respPayload)
+    assertTrue(worker.running, "Worker transitioned to running = true after state_response")
+    assertEq(worker.phase, "MINING", "Worker phase synchronized to MINING")
+
+    -- 4. Controller stops workers: desiredState changes to STOPPED
+    ctrl:setWorkerDesiredState(8, "STOPPED")
+    assertEq(ctrl.workers[8].desiredState, "STOPPED", "Worker 8 desired state set to STOPPED")
+    assertTrue(#testNetBus >= 4, "Controller immediately dispatched state_response and command to worker")
+
+    -- Next state query from worker returns STOPPED
+    testNetBus = {}
+    worker:queryStateFromController()
+    local qPkt = testNetBus[1].pkt
+    local qPayload, qFrom = cNet:unpackPacket(qPkt)
+    ctrl:handlePacket(qPayload, qFrom)
+    local stopRespPkt = testNetBus[2].pkt
+    local stopRespPayload = wNet:unpackPacket(stopRespPkt)
+    assertEq(stopRespPayload.desiredState, "STOPPED", "Controller replied with desiredState STOPPED")
+
+    -- Worker synchronizes to STOPPED
+    local unloaded = false
+    worker.unloadToBarrel = function() unloaded = true end
+    worker.teleportHome = function() worker.pos = { x = 0, y = 0, z = 0, dir = 0 } return true end
+    worker:handleStateResponse(stopRespPayload)
+    assertEq(worker.running, false, "Worker stopped after synchronizing to STOPPED")
+    assertEq(worker.phase, "IDLE (Remote)", "Worker phase transitioned to IDLE (Remote) at base")
+    assertTrue(unloaded, "Worker unloaded inventory upon stopping at base")
+end
+
 print(("ALL %d ASSERTIONS PASSED!"):format(passed))
