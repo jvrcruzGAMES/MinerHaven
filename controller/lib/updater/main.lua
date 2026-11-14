@@ -312,34 +312,92 @@ function Updater.flashSide(side, sourceDir)
 end
 
 --- Send OTA (Over-The-Air) firmware update to a paired worker over Workernet.
+-- Streams files in chunks (<= 1024 bytes) to prevent "Too long without yielding"
+-- and to ensure payloads easily fit inside modem packet size limits.
 -- @tparam table net Workernet Node instance
 -- @tparam number|string targetWorkerId Worker ID
 -- @tparam[opt] string sourceDir Local firmware folder
+-- @tparam[opt] function progressFn Callback fn(fileIndex, totalFiles, relPath, chunkIndex, totalChunks)
 -- @treturn boolean Success
 -- @treturn string Message
-function Updater.sendOTAUpdate(net, targetWorkerId, sourceDir)
+function Updater.sendOTAUpdate(net, targetWorkerId, sourceDir, progressFn)
     local firmwareFiles = Updater.loadWorkerFirmware(sourceDir)
-    local fileCount = 0
-    for _ in pairs(firmwareFiles) do fileCount = fileCount + 1 end
-    if fileCount == 0 then
+    local fileList = {}
+    for relPath, content in pairs(firmwareFiles) do
+        table.insert(fileList, { path = relPath, content = content })
+    end
+    if #fileList == 0 then
         return false, "No worker firmware files available in local firmware storage."
     end
 
     local localVer = Updater.getLocalVersion()
-    local payload = {
-        type = "command",
-        action = "ota_update",
-        version = localVer,
-        files = firmwareFiles,
-    }
-
     local targetNum = tonumber(targetWorkerId) or targetWorkerId
-    local ok, err = net:send(targetNum, payload)
-    if ok then
-        return true, string.format("OTA update payload (v%s, %d files) sent to Worker %s", localVer, fileCount, tostring(targetWorkerId))
-    else
-        return false, string.format("Failed to send OTA update to Worker %s: %s", tostring(targetWorkerId), tostring(err))
+
+    -- 1. Send ota_start command
+    local startPayload = {
+        type = "command",
+        action = "ota_start",
+        version = localVer,
+        totalFiles = #fileList,
+    }
+    local ok, err = net:send(targetNum, startPayload)
+    if not ok then
+        return false, string.format("Failed to initiate OTA on Worker %s: %s", tostring(targetWorkerId), tostring(err))
     end
+    if os and os.sleep then pcall(os.sleep, 0.05) end
+
+    -- 2. Stream each file in chunks of <= 1024 bytes
+    local CHUNK_SIZE = 1024
+    local totalFiles = #fileList
+    for fileIdx, fileInfo in ipairs(fileList) do
+        local content = fileInfo.content or ""
+        local totalChunks = math.max(1, math.ceil(#content / CHUNK_SIZE))
+
+        for chunkIdx = 1, totalChunks do
+            local startOffset = (chunkIdx - 1) * CHUNK_SIZE + 1
+            local endOffset = math.min(#content, startOffset + CHUNK_SIZE - 1)
+            local chunkData = content:sub(startOffset, endOffset)
+
+            local chunkPayload = {
+                type = "command",
+                action = "ota_chunk",
+                path = fileInfo.path,
+                chunk = chunkData,
+                chunkIndex = chunkIdx,
+                totalChunks = totalChunks,
+                fileIndex = fileIdx,
+                totalFiles = totalFiles,
+                isLastChunk = (chunkIdx == totalChunks),
+                isLastFile = (fileIdx == totalFiles),
+            }
+
+            local cOk, cErr = net:send(targetNum, chunkPayload)
+            if not cOk then
+                return false, string.format("OTA failed on %s chunk %d/%d: %s", fileInfo.path, chunkIdx, totalChunks, tostring(cErr))
+            end
+
+            if progressFn then
+                pcall(progressFn, fileIdx, totalFiles, fileInfo.path, chunkIdx, totalChunks)
+            end
+
+            -- Yield between packets to reset CraftOS watchdog timer
+            if os and os.sleep then pcall(os.sleep, 0.05) end
+        end
+    end
+
+    -- 3. Send ota_commit command
+    local commitPayload = {
+        type = "command",
+        action = "ota_commit",
+        version = localVer,
+        totalFiles = totalFiles,
+    }
+    local commitOk, commitErr = net:send(targetNum, commitPayload)
+    if not commitOk then
+        return false, string.format("Failed to commit OTA on Worker %s: %s", tostring(targetWorkerId), tostring(commitErr))
+    end
+
+    return true, string.format("OTA update (v%s, %d files) successfully streamed to Worker %s", localVer, totalFiles, tostring(targetWorkerId))
 end
 
 return Updater

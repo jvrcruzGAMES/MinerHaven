@@ -1724,33 +1724,46 @@ do
             return true
         end
     }
+    local otaPackets = {}
+    local mockOtaNet = {
+        send = function(self, targetId, payload)
+            table.insert(otaPackets, { targetId = targetId, payload = payload })
+            otaSentTarget = targetId
+            otaSentPayload = payload
+            return true
+        end
+    }
     local otaOk, otaMsg = Updater.sendOTAUpdate(mockOtaNet, 7, "firmware/worker")
     assertTrue(otaOk, "sendOTAUpdate returned true")
     assertEq(otaSentTarget, 7, "OTA sent to target worker 7")
-    assertEq(otaSentPayload.type, "command", "OTA packet is a command")
-    assertEq(otaSentPayload.action, "ota_update", "OTA packet action is ota_update")
-    assertTrue(type(otaSentPayload.files) == "table", "OTA packet contains firmware files")
+    assertTrue(#otaPackets >= 3, "OTA sent multi-packet stream (start, chunks, commit)")
+    assertEq(otaPackets[1].payload.action, "ota_start", "First packet is ota_start")
+    assertEq(otaPackets[#otaPackets].payload.action, "ota_commit", "Final packet is ota_commit")
 
-    -- Test Worker:handleCommand({ action = "ota_update" }) staging and applying
+    -- Test Worker streaming OTA: ota_start -> ota_chunk -> ota_commit
     local rebootCalled = false
     _G.os.reboot = function() rebootCalled = true end
     local WorkerClass = dofile("worker/worker.lua")
     local workerOta = WorkerClass.new()
     workerOta.controllerId = 1
-    local testOtaPayload = {
-        action = "ota_update",
-        version = "1.2.0",
-        files = {
-            ["worker/version_ota.txt"] = "v1.2.0-test",
-        }
-    }
-    workerOta:handleCommand(testOtaPayload)
-    assertTrue(_G.fs.exists("worker/version_ota.txt"), "Worker applied staged OTA update file")
+    workerOta:handleCommand({ action = "ota_start", version = "1.2.0", totalFiles = 1 })
+    workerOta:handleCommand({
+        action = "ota_chunk",
+        path = "worker/version_ota.txt",
+        chunk = "v1.2.0-chunked",
+        chunkIndex = 1,
+        totalChunks = 1,
+        fileIndex = 1,
+        totalFiles = 1,
+        isLastChunk = true,
+    })
+    workerOta:handleCommand({ action = "ota_commit", version = "1.2.0" })
+    assertTrue(_G.fs.exists("worker/version_ota.txt"), "Worker applied streamed OTA chunked update")
     local fCheck = _G.fs.open("worker/version_ota.txt", "r")
     local fCheckContent = fCheck and fCheck.readAll()
     if fCheck then fCheck.close() end
-    assertEq(fCheckContent, "v1.2.0-test", "OTA updated file content matches")
-    assertTrue(rebootCalled, "Worker initiated reboot after OTA update")
+    assertEq(fCheckContent, "v1.2.0-chunked", "Streamed OTA file content matches")
+    assertTrue(rebootCalled, "Worker initiated reboot after OTA commit")
 
     -- Test Dashboard [OTA] button and CLI 'ota' and 'flash' commands
     local Dashboard = dofile("controller/dashboard.lua")
@@ -1785,7 +1798,7 @@ do
 
     -- Test Dashboard CLI commands: 'ota 9' and 'flash right'
     testDash2:handleCommand("ota 9")
-    assertTrue(mockDashboardCtrl2.lastLog:find("OTA update payload", 1, true) ~= nil, "CLI 'ota 9' sent OTA")
+    assertTrue(mockDashboardCtrl2.lastLog:find("OTA update", 1, true) ~= nil, "CLI 'ota 9' sent OTA")
     testDash2:handleCommand("flash right")
     assertTrue(mockDashboardCtrl2.lastLog:find("Flashed", 1, true) ~= nil, "CLI 'flash right' flashed side")
 end

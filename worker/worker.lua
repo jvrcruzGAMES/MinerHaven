@@ -1132,13 +1132,75 @@ function Worker:handleCommand(payload)
         Device.unpair()
         self.controllerId = nil
         self.unpairedRequested = true
+    elseif action == "ota_start" then
+        self.running = false
+        self.oreQueue = {}
+        self.phase = "UPDATING (OTA)"
+        self.lastAction = string.format("OTA start (v%s, %d files)", tostring(payload.version or ""), payload.totalFiles or 0)
+        self.otaStagedFiles = {}
+        local stagingDir = ".staging"
+        if fs.exists(stagingDir) and fs.delete then pcall(fs.delete, stagingDir) end
+        if fs.makeDir then fs.makeDir(stagingDir) end
+        self:renderHeadlessUI()
+        self:queryStateFromController()
+    elseif action == "ota_chunk" then
+        self.running = false
+        self.phase = "UPDATING (OTA)"
+        local stagingDir = ".staging"
+        local stagedPath = combinePath(stagingDir, payload.path)
+        local sDir = getDirPath(stagedPath)
+        if sDir and sDir ~= "" and not fs.exists(sDir) and fs.makeDir then fs.makeDir(sDir) end
+
+        local mode = (payload.chunkIndex == 1) and "w" or "a"
+        local f = fs.open(stagedPath, mode)
+        if f then
+            f.write(payload.chunk or "")
+            f.close()
+        end
+
+        self.otaStagedFiles = self.otaStagedFiles or {}
+        if payload.isLastChunk then
+            self.otaStagedFiles[payload.path] = true
+        end
+
+        self.lastAction = string.format("OTA [%d/%d]: %s (%d/%d)",
+            payload.fileIndex or 0, payload.totalFiles or 0,
+            payload.path or "",
+            payload.chunkIndex or 0, payload.totalChunks or 0)
+        self:renderHeadlessUI()
+    elseif action == "ota_commit" then
+        self.running = false
+        self.phase = "UPDATING (OTA)"
+        self.lastAction = "Applying staged OTA update..."
+        self:renderHeadlessUI()
+        self:queryStateFromController()
+
+        local stagingDir = ".staging"
+        local count = 0
+        for relPath, _ in pairs(self.otaStagedFiles or {}) do
+            local destPath = relPath
+            local destDir = getDirPath(destPath)
+            if destDir and destDir ~= "" and not fs.exists(destDir) and fs.makeDir then fs.makeDir(destDir) end
+            local stagedPath = combinePath(stagingDir, relPath)
+            if fs.exists(destPath) and fs.delete then pcall(fs.delete, destPath) end
+            copyFile(stagedPath, destPath)
+            count = count + 1
+        end
+        if fs.delete then pcall(fs.delete, stagingDir) end
+
+        self.lastAction = string.format("OTA update complete (%d files). Rebooting...", count)
+        self:renderHeadlessUI()
+        self:queryStateFromController()
+        if os and os.sleep then pcall(os.sleep, 1) end
+        if os and os.reboot then pcall(os.reboot) end
+        return
     elseif action == "ota_update" then
         self.running = false
         self.oreQueue = {}
         self.phase = "UPDATING (OTA)"
         self.lastAction = "Applying OTA firmware update..."
         self:renderHeadlessUI()
-        self:sendTelemetry()
+        self:queryStateFromController()
 
         local files = payload.files or {}
         local stagingDir = ".staging"
@@ -1166,7 +1228,7 @@ function Worker:handleCommand(payload)
             self.lastAction = "OTA update failed: " .. tostring(writeErr or "no files received")
             self.phase = "IDLE (Remote)"
             self:renderHeadlessUI()
-            self:sendTelemetry()
+            self:queryStateFromController()
             return
         end
 
@@ -1183,9 +1245,9 @@ function Worker:handleCommand(payload)
 
         self.lastAction = string.format("OTA update complete (%d files). Rebooting...", fileCount)
         self:renderHeadlessUI()
-        self:sendTelemetry()
-        if os.sleep then os.sleep(1) end
-        if os.reboot then os.reboot() end
+        self:queryStateFromController()
+        if os and os.sleep then pcall(os.sleep, 1) end
+        if os and os.reboot then pcall(os.reboot) end
         return
     end
     self:renderHeadlessUI()

@@ -7,6 +7,12 @@ local Crypto = {}
 -- Bitwise Operations Polyfill
 --------------------------------------------------------------------------------
 
+local function safeYield()
+    if os and os.sleep then
+        pcall(os.sleep, 0)
+    end
+end
+
 local band, bor, bxor, bnot, rshift, lshift, rrotate
 
 if type(bit32) == "table" then
@@ -176,7 +182,12 @@ function Crypto.sha256Raw(msg)
     local h7 = 0x5be0cd19
 
     local w = {}
+    local chunkIndex = 0
     for chunkStart = 1, #padded, 64 do
+        chunkIndex = chunkIndex + 1
+        if chunkIndex % 32 == 0 then
+            safeYield()
+        end
         for i = 0, 15 do
             local idx = chunkStart + i * 4
             local b1, b2, b3, b4 = padded:byte(idx, idx + 3)
@@ -327,6 +338,9 @@ local function generateKeystream(key, nonce, len)
     local blocks = {}
     local needed = math.ceil(len / 32)
     for counter = 1, needed do
+        if counter % 16 == 0 then
+            safeYield()
+        end
         local counterBytes = string.char(
             band(rshift(counter, 24), 0xFF),
             band(rshift(counter, 16), 0xFF),
@@ -351,6 +365,9 @@ function Crypto.cipher(key, data, nonce)
     local ks = generateKeystream(key, nonce, #data)
     local out = {}
     for i = 1, #data do
+        if i % 1024 == 0 then
+            safeYield()
+        end
         table.insert(out, string.char(bxor(data:byte(i), ks:byte(i))))
     end
     return table.concat(out)

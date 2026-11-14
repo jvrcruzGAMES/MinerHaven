@@ -307,14 +307,24 @@ function Dashboard:handleCommand(cmd)
             if count == 1 then targetId = onlyId end
         end
         if targetId then
-            self.controller.lastLog = "Sending OTA update to Worker " .. tostring(targetId) .. "..."
+            self.controller.lastLog = "Initiating OTA update for Worker " .. tostring(targetId) .. "..."
             self:render()
-            local ok, msg = Updater.sendOTAUpdate(self.controller.net, targetId)
+            local function onProgress(fIdx, totalF, path, cIdx, totalC)
+                local pct = math.floor((((fIdx - 1) + (cIdx / totalC)) / totalF) * 100)
+                self.controller.lastLog = string.format("OTA -> Worker %s: [%d%%] %s (%d/%d)", tostring(targetId), pct, path, cIdx, totalC)
+                self:render()
+            end
+            local ok, msg = Updater.sendOTAUpdate(self.controller.net, targetId, nil, onProgress)
             self.controller.lastLog = msg
         else
             local sent = 0
             for id, _ in pairs(self.controller.workers) do
-                Updater.sendOTAUpdate(self.controller.net, id)
+                local function onProgress(fIdx, totalF, path, cIdx, totalC)
+                    local pct = math.floor((((fIdx - 1) + (cIdx / totalC)) / totalF) * 100)
+                    self.controller.lastLog = string.format("OTA -> Worker %s: [%d%%] %s", tostring(id), pct, path)
+                    self:render()
+                end
+                Updater.sendOTAUpdate(self.controller.net, id, nil, onProgress)
                 sent = sent + 1
             end
             self.controller.lastLog = string.format("Broadcasted OTA update to %d worker(s).", sent)
@@ -370,9 +380,14 @@ function Dashboard:handleMouseClick(button, x, y)
             elseif btn.action == "unpair" then
                 self.controller:unpairWorker(btn.workerId)
             elseif btn.action == "ota" then
-                self.controller.lastLog = "Sending OTA update to Worker " .. tostring(btn.workerId) .. "..."
+                self.controller.lastLog = "Initiating OTA update for Worker " .. tostring(btn.workerId) .. "..."
                 self:render()
-                local ok, msg = Updater.sendOTAUpdate(self.controller.net, btn.workerId)
+                local function onProgress(fIdx, totalF, path, cIdx, totalC)
+                    local pct = math.floor((((fIdx - 1) + (cIdx / totalC)) / totalF) * 100)
+                    self.controller.lastLog = string.format("OTA -> Worker %s: [%d%%] %s (%d/%d)", tostring(btn.workerId), pct, path, cIdx, totalC)
+                    self:render()
+                end
+                local ok, msg = Updater.sendOTAUpdate(self.controller.net, btn.workerId, nil, onProgress)
                 self.controller.lastLog = msg
             end
             return
